@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.env
+.transcripts/
+.task_outputs/
+
+# Local reference clone used while studying the tutorial repository.
+_reference/
