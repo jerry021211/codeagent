@@ -7,6 +7,14 @@ from codeagent.tools.defaults import create_default_registry, default_tools
 from codeagent.tools.edit import EditFileTool
 from codeagent.tools.glob_tool import GlobTool
 from codeagent.tools.grep import GrepTool
+from codeagent.tools.memory import (
+    LOAD_MEMORY_TOOL_NAME,
+    REMEMBER_TOOL_NAME,
+    SEARCH_MEMORY_TOOL_NAME,
+    LoadMemoryTool,
+    RememberTool,
+    SearchMemoryTool,
+)
 from codeagent.tools.read import ReadFileTool
 from codeagent.tools.registry import ToolRegistry
 from codeagent.tools.skill import LOAD_SKILL_TOOL_NAME, LoadSkillTool
@@ -30,9 +38,15 @@ __all__ = [
     "GlobTool",
     "GrepTool",
     "LOAD_SKILL_TOOL_NAME",
+    "LOAD_MEMORY_TOOL_NAME",
     "LoadSkillTool",
+    "LoadMemoryTool",
     "ReadFileTool",
+    "REMEMBER_TOOL_NAME",
     "TASK_TOOL_NAME",
+    "SEARCH_MEMORY_TOOL_NAME",
+    "RememberTool",
+    "SearchMemoryTool",
     "TaskTool",
     "TodoStore",
     "Tool",

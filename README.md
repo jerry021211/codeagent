@@ -195,6 +195,68 @@ ENABLE_SKILLS=true
 SKILLS_DIR=.skills
 ```
 
+## 长期记忆：Memory
+
+默认启用轻量级长期记忆。启动时 Agent 只会收到 memory catalog，也就是记忆名称、
+类型和一句话描述；完整内容不会常驻上下文，需要模型主动调用工具按需读取。
+
+内置三个 memory 工具：
+
+- `search_memory(query)`：按关键词搜索记忆摘要。
+- `load_memory(name)`：按精确名称加载完整记忆。
+- `remember(name, type, description, content)`：保存稳定、可复用的长期记忆。
+
+记忆保存在 `.memory/` 目录中，每条记忆是一个 markdown 文件，`MEMORY.md` 是自动
+生成的索引。默认 `.memory/` 已加入 `.gitignore`，避免把个人偏好或项目外信息误提交。
+
+推荐记忆内容：
+
+- 用户长期偏好，例如“回答时先给结论，再给关键理由”。
+- 项目约定，例如“子 Agent 默认不能再委托子 Agent”。
+- 重要决策，例如“memory 使用 markdown store，暂不引入向量库”。
+- 可复用参考，例如“某类任务应优先加载某个 skill”。
+
+不推荐保存：
+
+- API key、token、密码等秘密。
+- 当前任务的临时状态。
+- 大段工具输出或大段代码。
+
+父 Agent 默认拥有读写 memory 的工具；子 Agent 默认只拥有读 memory 的工具。这样子
+Agent 可以利用长期记忆完成任务，但不会随手污染长期记忆。确实需要让子 Agent 写入时，
+再打开 `MEMORY_ALLOW_SUBAGENT_WRITE=true`。
+
+可配置项：
+
+```bash
+ENABLE_MEMORY=true
+MEMORY_DIR=.memory
+MEMORY_MAX_ITEMS_IN_PROMPT=50
+MEMORY_MAX_LOADED_ITEMS=5
+MEMORY_MAX_MEMORY_BYTES=50000
+MEMORY_AUTO_EXTRACT=false
+MEMORY_EXTRACT_RECENT_MESSAGES=12
+MEMORY_CONSOLIDATE_THRESHOLD=30
+MEMORY_CONSOLIDATE_MODE=simple   # simple | model
+MEMORY_ALLOW_SUBAGENT_WRITE=false
+```
+
+`MEMORY_AUTO_EXTRACT=true` 时，Agent 会在每轮结束后让模型从最近对话中抽取稳定记忆。
+默认关闭，是为了避免把临时对话误写成长期状态。`MEMORY_CONSOLIDATE_MODE=model`
+会在记忆数量超过阈值后让模型合并重复记忆；默认 `simple` 只重建索引。
+
+可以用下面的 query 测试手动记忆：
+
+```bash
+python -m codeagent --no-stream "请记住：这个项目里解释代码时先讲调用链，再讲关键函数。保存成长期记忆，然后告诉我保存的 memory 名称。"
+```
+
+也可以测试按需读取：
+
+```bash
+python -m codeagent --no-stream "按照我之前记录过的项目讲解偏好，解释 codeagent/agent.py 的主循环。"
+```
+
 ## 上下文压缩：Context Compact
 
 默认启用 `CONTEXT_COMPACT_MODE=simple`。Agent 会在每次模型调用前运行一组

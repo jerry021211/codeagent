@@ -13,10 +13,14 @@ from typing import Any
 from codeagent.anthropic_client import AnthropicModelClient
 from codeagent.context import ContextManager
 from codeagent.hooks import HookManager
+from codeagent.memory import MemoryManager
 from codeagent.messages import Message, ToolUse, extract_text, normalize_tool_uses
 from codeagent.tracing import trace_run
 from codeagent.tools import (
     COMPACT_TOOL_NAME,
+    LOAD_MEMORY_TOOL_NAME,
+    REMEMBER_TOOL_NAME,
+    SEARCH_MEMORY_TOOL_NAME,
     TASK_TOOL_NAME,
     CompactTool,
     TaskTool,
@@ -58,6 +62,13 @@ SKILL_SYSTEM_GUIDANCE = (
     "its specialized workflow."
 )
 
+MEMORY_SYSTEM_GUIDANCE = (
+    "Use long-term memory selectively. Search or load memories when the task "
+    "may depend on prior user preferences, project conventions, or reusable "
+    "decisions. Use remember only for stable facts that should help future "
+    "turns; do not store secrets, temporary task status, or large code blocks."
+)
+
 @dataclass(slots=True)
 class AgentConfig:
     """Runtime settings for one agent instance."""
@@ -91,6 +102,7 @@ class Agent:
     config: AgentConfig
     hooks: HookManager = field(default_factory=HookManager)
     context: ContextManager = field(default_factory=ContextManager)
+    memory_manager: MemoryManager | None = None
     messages: list[Message] = field(default_factory=list)
     allow_subagents: bool = True
     subagent_max_iterations: int = 30
@@ -98,6 +110,7 @@ class Agent:
     subagent_environment_factory: Callable[[], SubagentEnvironment] | None = None
     subagent_log: Callable[[str], None] | None = None
     skill_catalog: str = ""
+    memory_catalog: str = ""
     _compact_requested: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
@@ -179,6 +192,7 @@ class Agent:
                         stop_reason=response.stop_reason,
                         iterations=iterations,
                     )
+                    self._after_turn_memory()
                     run_trace.end(
                         outputs={
                             "final_text": result.final_text,
@@ -208,6 +222,7 @@ class Agent:
                 stop_reason=f"max_iterations:{last_stop_reason}",
                 iterations=iterations,
             )
+            self._after_turn_memory()
             run_trace.end(
                 outputs={
                     "final_text": result.final_text,
@@ -284,6 +299,7 @@ class Agent:
                     allow_subagents=False,
                     subagent_log=self.subagent_log,
                     skill_catalog=self.skill_catalog,
+                    memory_catalog=self.memory_catalog,
                 )
                 result = subagent.run(task_description)
                 if result.final_text:
@@ -354,7 +370,30 @@ class Agent:
             system_prompt = (
                 f"{system_prompt}\n\n{self.skill_catalog}\n\n{SKILL_SYSTEM_GUIDANCE}"
             )
+
+        has_memory_tools = any(
+            schema.get("name")
+            in {SEARCH_MEMORY_TOOL_NAME, LOAD_MEMORY_TOOL_NAME, REMEMBER_TOOL_NAME}
+            for schema in tool_schemas
+        )
+        if self.memory_catalog and "Available memories:" not in system_prompt:
+            system_prompt = f"{system_prompt}\n\n{self.memory_catalog}"
+        if has_memory_tools and "long-term memory" not in system_prompt:
+            system_prompt = f"{system_prompt}\n\n{MEMORY_SYSTEM_GUIDANCE}"
         return system_prompt
+
+    def _after_turn_memory(self) -> None:
+        if self.memory_manager is None:
+            return
+        try:
+            self.memory_manager.after_turn(
+                self.messages,
+                client=self.client,
+                model=self.config.model,
+                max_tokens=self.config.max_tokens,
+            )
+        except Exception:
+            return
 
 
 def _is_prompt_too_long(exc: Exception) -> bool:

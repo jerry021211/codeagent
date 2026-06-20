@@ -9,6 +9,8 @@ from codeagent import (
     Agent,
     ContextManager,
     EnvironmentConfig,
+    MemoryManager,
+    MemoryStore,
     SkillLoader,
     TodoStore,
     create_default_hooks,
@@ -35,6 +37,15 @@ def main(argv: list[str] | None = None) -> int:
     workspace = Path.cwd()
     skill_loader = create_skill_loader(env, workspace)
     skill_catalog = skill_loader.catalog_prompt() if skill_loader is not None else ""
+    memory_store = create_memory_store(env, workspace)
+    memory_manager = (
+        MemoryManager(memory_store, env.memory_config)
+        if memory_store is not None
+        else None
+    )
+    memory_catalog = (
+        memory_manager.catalog_prompt() if memory_manager is not None else ""
+    )
     todo_store = TodoStore()
     context = ContextManager(config=env.context_config, todo_store=todo_store)
     agent = Agent(
@@ -46,17 +57,22 @@ def main(argv: list[str] | None = None) -> int:
             todo_store=todo_store,
             todo_log=print,
             skill_loader=skill_loader,
+            memory_store=memory_store,
+            memory_max_items=env.memory_config.max_loaded_items,
         ),
         config=env.to_agent_config(),
         hooks=create_default_hooks(workspace=workspace, todo_store=todo_store),
         context=context,
+        memory_manager=memory_manager,
         subagent_environment_factory=lambda: create_default_subagent_environment(
             workspace,
             skill_loader,
+            memory_store,
             env,
         ),
         subagent_log=print,
         skill_catalog=skill_catalog,
+        memory_catalog=memory_catalog,
     )
 
     query = " ".join(args.query).strip()
@@ -103,9 +119,23 @@ def create_skill_loader(env: EnvironmentConfig, workspace: Path) -> SkillLoader 
     return SkillLoader(roots=roots)
 
 
+def create_memory_store(env: EnvironmentConfig, workspace: Path) -> MemoryStore | None:
+    if not env.memory_config.enabled:
+        return None
+
+    root = env.memory_config.memory_dir
+    if not root.is_absolute():
+        root = workspace / root
+    return MemoryStore(
+        root=root,
+        max_memory_bytes=env.memory_config.max_memory_bytes,
+    )
+
+
 def create_default_subagent_environment(
     workspace: Path,
     skill_loader: SkillLoader | None,
+    memory_store: MemoryStore | None,
     env: EnvironmentConfig,
 ):
     todo_store = TodoStore()
@@ -115,6 +145,9 @@ def create_default_subagent_environment(
             todo_store=todo_store,
             todo_log=print,
             skill_loader=skill_loader,
+            memory_store=memory_store,
+            allow_memory_write=env.memory_config.allow_subagent_write,
+            memory_max_items=env.memory_config.max_loaded_items,
         ),
         create_default_hooks(workspace=workspace, todo_store=todo_store),
         context,

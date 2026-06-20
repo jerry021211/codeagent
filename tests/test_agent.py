@@ -13,7 +13,8 @@ from codeagent import (
     ToolDefinition,
     ToolRegistry,
 )
-from codeagent.tools import TodoStore, TodoWriteTool
+from codeagent.tools import SearchMemoryTool, TodoStore, TodoWriteTool
+from codeagent.memory import MemoryStore
 
 
 class FakeClient:
@@ -281,6 +282,38 @@ class AgentTests(unittest.TestCase):
         self.assertIn("python-refactor", client.system_prompt)
         self.assertIn("Use load_skill(name)", client.system_prompt)
 
+    def test_agent_adds_memory_catalog_when_available(self) -> None:
+        class CaptureClient:
+            def __init__(self) -> None:
+                self.system_prompt = ""
+
+            def create_message(self, **kwargs):
+                self.system_prompt = kwargs["system"]
+                return ModelResponse(
+                    stop_reason="end_turn",
+                    content=[{"type": "text", "text": "done"}],
+                )
+
+        client = CaptureClient()
+        store = MemoryStore(".memory-test")
+        tools = ToolRegistry()
+        tools.register(SearchMemoryTool(store=store))
+        agent = Agent(
+            client=client,
+            tools=tools,
+            config=AgentConfig(model="fake-model", system_prompt="base prompt"),
+            memory_catalog=(
+                "Available memories:\n"
+                "- Project Style [project]: Explain call chains first."
+            ),
+        )
+
+        agent.run("do work")
+
+        self.assertIn("Available memories:", client.system_prompt)
+        self.assertIn("Project Style", client.system_prompt)
+        self.assertIn("Use long-term memory selectively", client.system_prompt)
+
     def test_environment_config_reads_model_settings(self) -> None:
         with patch.dict(
             "os.environ",
@@ -296,6 +329,10 @@ class AgentTests(unittest.TestCase):
                 "CONTEXT_COMPACT_MODE": "model",
                 "CONTEXT_MAX_MESSAGES": "9",
                 "CONTEXT_TOOL_RESULT_BUDGET_CHARS": "111",
+                "ENABLE_MEMORY": "true",
+                "MEMORY_DIR": "project-memory",
+                "MEMORY_AUTO_EXTRACT": "true",
+                "MEMORY_ALLOW_SUBAGENT_WRITE": "true",
             },
             clear=True,
         ):
@@ -312,6 +349,10 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(env.context_config.mode, "model")
         self.assertEqual(env.context_config.max_messages, 9)
         self.assertEqual(env.context_config.tool_result_budget_chars, 111)
+        self.assertTrue(env.memory_config.enabled)
+        self.assertEqual(str(env.memory_config.memory_dir), "project-memory")
+        self.assertTrue(env.memory_config.auto_extract)
+        self.assertTrue(env.memory_config.allow_subagent_write)
 
 
 if __name__ == "__main__":

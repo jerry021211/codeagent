@@ -10,6 +10,7 @@ from typing import Callable
 from codeagent.agent import AgentConfig
 from codeagent.anthropic_client import AnthropicModelClient
 from codeagent.context import ContextConfig
+from codeagent.memory import MemoryConfig
 
 
 def _load_dotenv() -> None:
@@ -63,6 +64,7 @@ class EnvironmentConfig:
     enable_skills: bool = True
     skill_roots: tuple[Path, ...] = (Path(".skills"),)
     context_config: ContextConfig = field(default_factory=ContextConfig)
+    memory_config: MemoryConfig = field(default_factory=MemoryConfig)
 
     @classmethod
     def from_env(cls) -> "EnvironmentConfig":
@@ -109,6 +111,18 @@ class EnvironmentConfig:
                 ),
                 reactive_retries=_int_env("CONTEXT_REACTIVE_RETRIES", 1),
                 max_compact_failures=_int_env("CONTEXT_MAX_COMPACT_FAILURES", 3),
+            ),
+            memory_config=MemoryConfig(
+                enabled=_bool_env("ENABLE_MEMORY", True),
+                memory_dir=Path(os.getenv("MEMORY_DIR", ".memory")),
+                max_items_in_prompt=_int_env("MEMORY_MAX_ITEMS_IN_PROMPT", 50),
+                max_loaded_items=_int_env("MEMORY_MAX_LOADED_ITEMS", 5),
+                max_memory_bytes=_int_env("MEMORY_MAX_MEMORY_BYTES", 50_000),
+                auto_extract=_bool_env("MEMORY_AUTO_EXTRACT", False),
+                extract_recent_messages=_int_env("MEMORY_EXTRACT_RECENT_MESSAGES", 12),
+                consolidate_threshold=_int_env("MEMORY_CONSOLIDATE_THRESHOLD", 30),
+                consolidate_mode=os.getenv("MEMORY_CONSOLIDATE_MODE", "simple"),
+                allow_subagent_write=_bool_env("MEMORY_ALLOW_SUBAGENT_WRITE", False),
             ),
         )
 

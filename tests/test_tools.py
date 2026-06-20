@@ -4,11 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codeagent import create_default_registry
+from codeagent import MemoryStore, create_default_registry
 from codeagent.skills import SkillLoader
 from codeagent.tools import (
     COMPACT_TOOL_NAME,
+    LOAD_MEMORY_TOOL_NAME,
     LOAD_SKILL_TOOL_NAME,
+    REMEMBER_TOOL_NAME,
+    SEARCH_MEMORY_TOOL_NAME,
     TASK_TOOL_NAME,
     TaskTool,
     TodoStore,
@@ -64,6 +67,29 @@ class DefaultToolTests(unittest.TestCase):
         schemas = {schema["name"] for schema in registry.schemas()}
 
         self.assertIn(LOAD_SKILL_TOOL_NAME, schemas)
+
+    def test_default_registry_can_include_memory_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = MemoryStore(Path(temp_dir))
+            registry = create_default_registry(memory_store=store)
+            schemas = {schema["name"] for schema in registry.schemas()}
+
+            self.assertIn(SEARCH_MEMORY_TOOL_NAME, schemas)
+            self.assertIn(LOAD_MEMORY_TOOL_NAME, schemas)
+            self.assertIn(REMEMBER_TOOL_NAME, schemas)
+
+    def test_default_registry_can_make_memory_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = MemoryStore(Path(temp_dir))
+            registry = create_default_registry(
+                memory_store=store,
+                allow_memory_write=False,
+            )
+            schemas = {schema["name"] for schema in registry.schemas()}
+
+            self.assertIn(SEARCH_MEMORY_TOOL_NAME, schemas)
+            self.assertIn(LOAD_MEMORY_TOOL_NAME, schemas)
+            self.assertNotIn(REMEMBER_TOOL_NAME, schemas)
 
     def test_default_registry_can_include_compact_with_callback(self) -> None:
         registry = create_default_registry(compact_fn=lambda: "compacted")

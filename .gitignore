@@ -9,6 +9,7 @@ dist/
 build/
 *.egg-info/
 .env
+.memory/
 .transcripts/
 .task_outputs/
 
