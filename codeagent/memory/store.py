@@ -64,6 +64,7 @@ class MemoryStore:
             source=clean_source,
             created_at=created_at,
             updated_at=now,
+            filename=self._filename_for_name(clean_name),
         )
         self.root.mkdir(parents=True, exist_ok=True)
         self._path_for_name(clean_name).write_text(
@@ -79,6 +80,15 @@ class MemoryStore:
         if record is None:
             raise KeyError(name)
         return record
+
+    def load_file(self, filename: str) -> MemoryRecord:
+        clean = Path(str(filename or "").strip()).name
+        if not clean.endswith(".md") or clean == INDEX_FILE_NAME:
+            raise KeyError(filename)
+        path = self.root / clean
+        if not path.exists() or not self._is_inside_root(path):
+            raise KeyError(filename)
+        return self._read_record(path)
 
     def search(self, query: str, *, max_items: int = 5) -> list[MemoryRecord]:
         records = self.list_memories()
@@ -112,8 +122,10 @@ class MemoryStore:
             return ""
         lines = ["Available memories:"]
         for record in records:
+            filename = record.filename or self._filename_for_name(record.name)
             lines.append(
-                f"- {record.name} [{record.memory_type}]: {record.description}"
+                f"- {filename} | {record.name} [{record.memory_type}]: "
+                f"{record.description}"
             )
         return "\n".join(lines)
 
@@ -173,13 +185,17 @@ class MemoryStore:
             created_at=meta.get("created_at") or "",
             updated_at=meta.get("updated_at") or "",
             content=match.group("body").strip(),
+            filename=path.name,
         )
 
     def _path_for_name(self, name: str) -> Path:
-        path = self.root / f"{self._slug(name)}.md"
+        path = self.root / self._filename_for_name(name)
         if not self._is_inside_root(path):
             raise ValueError(f"Invalid memory name: {name}")
         return path
+
+    def _filename_for_name(self, name: str) -> str:
+        return f"{self._slug(name)}.md"
 
     def _is_inside_root(self, path: Path) -> bool:
         root = self.root.resolve()

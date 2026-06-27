@@ -21,6 +21,34 @@ class MemoryManager:
     def catalog_prompt(self) -> str:
         return self.store.catalog_prompt(max_items=self.config.max_items_in_prompt)
 
+    def select_context(
+        self,
+        messages: list[Message],
+        *,
+        client: Any | None,
+        model: str,
+        max_tokens: int,
+    ) -> str:
+        if not self.config.enabled or self.config.selection_mode != "llm":
+            return ""
+        if client is None:
+            return ""
+
+        records = self.store.list_memories()[: self.config.max_items_in_prompt]
+        if not records:
+            return ""
+
+        selected = self._select_memory_filenames(
+            records,
+            messages,
+            client=client,
+            model=model,
+            max_tokens=max_tokens,
+        )
+        if not selected:
+            return ""
+        return self._load_selected_context(selected)
+
     def after_turn(
         self,
         messages: list[Message],
@@ -175,6 +203,68 @@ class MemoryManager:
         except FileNotFoundError:
             pass
 
+    def _select_memory_filenames(
+        self,
+        records: list[MemoryRecord],
+        messages: list[Message],
+        *,
+        client: Any,
+        model: str,
+        max_tokens: int,
+    ) -> list[str]:
+        prompt = _memory_selection_prompt(records, messages)
+        response = client.create_message(
+            model=model,
+            system=(
+                "You select useful long-term memory files for a coding agent. "
+                "Return strict JSON only."
+            ),
+            messages=[{"role": "user", "content": prompt}],
+            tools=[],
+            max_tokens=min(max_tokens, 800),
+        )
+        payload = _parse_json_object(extract_text(response.content))
+        selected = payload.get("selected_memories")
+        if not isinstance(selected, list):
+            return []
+
+        valid = {
+            record.filename or f"{record.name}.md"
+            for record in records
+            if record.filename
+        }
+        filenames: list[str] = []
+        for item in selected:
+            filename = Path(str(item or "")).name
+            if filename not in valid or filename in filenames:
+                continue
+            filenames.append(filename)
+            if len(filenames) >= self.config.max_loaded_items:
+                break
+        return filenames
+
+    def _load_selected_context(self, filenames: list[str]) -> str:
+        sections: list[str] = []
+        remaining = self.config.session_budget_chars
+        for filename in filenames:
+            if remaining <= 0:
+                break
+            try:
+                record = self.store.load_file(filename)
+            except KeyError:
+                continue
+            body = _render_selected_memory(record)
+            if len(body) > remaining:
+                body = body[:remaining].rstrip() + "\n[truncated]"
+            sections.append(body)
+            remaining -= len(body)
+        if not sections:
+            return ""
+        return (
+            "Selected long-term memories loaded for this turn:\n\n"
+            + "\n\n".join(sections)
+        )
+
 
 def _memory_extraction_prompt(messages: list[Message]) -> str:
     return (
@@ -186,6 +276,41 @@ def _memory_extraction_prompt(messages: list[Message]) -> str:
         "Return a JSON array. Each object must have name, type, description, "
         "and content. Valid type values: user, feedback, project, reference.\n\n"
         f"Recent messages:\n{json.dumps(messages, ensure_ascii=False, default=str)}"
+    )
+
+
+def _memory_selection_prompt(   
+    records: list[MemoryRecord],
+    messages: list[Message],
+) -> str:   #构建选取memory的prompt的，用最近八条记录和memory列表。
+    memory_list = [
+        {
+            "filename": record.filename,
+            "name": record.name,
+            "type": record.memory_type,
+            "description": record.description,
+        }
+        for record in records
+        if record.filename
+    ]
+    return (
+        "根据当前任务，从下面的长期记忆清单中选择真正有用的记忆文件，最多 5 个。"
+        "不确定就不要选。只允许选择清单里的 filename。\n"
+        "返回严格 JSON，格式必须是："
+        "{\"selected_memories\":[\"file1.md\"]}。如果没有有用记忆，返回 "
+        "{\"selected_memories\":[]}。\n\n"
+        f"当前对话/任务：\n{_recent_message_text(messages)}\n\n"
+        f"长期记忆清单：\n{json.dumps(memory_list, ensure_ascii=False)}"
+    )
+
+
+def _render_selected_memory(record: MemoryRecord) -> str:
+    return (
+        f"<memory file=\"{record.filename}\" name=\"{record.name}\" "
+        f"type=\"{record.memory_type}\">\n"
+        f"Description: {record.description}\n\n"
+        f"{record.content}\n"
+        "</memory>"
     )
 
 
@@ -227,3 +352,47 @@ def _parse_json_array(text: str) -> list[Any]:
         except json.JSONDecodeError:
             return []
     return payload if isinstance(payload, list) else []
+
+
+def _parse_json_object(text: str) -> dict[str, Any]:
+    clean = text.strip()
+    if not clean:
+        return {}
+    if clean.startswith("```"):
+        clean = clean.strip("`")
+        if "\n" in clean:
+            clean = clean.split("\n", 1)[1].strip()
+    try:
+        payload = json.loads(clean)
+    except json.JSONDecodeError:
+        start = clean.find("{")
+        end = clean.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return {}
+        try:
+            payload = json.loads(clean[start : end + 1])
+        except json.JSONDecodeError:
+            return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _recent_message_text(messages: list[Message], *, max_chars: int = 8000) -> str:
+    lines: list[str] = []
+    for message in messages[-8:]:
+        role = str(message.get("role", "unknown"))
+        content = message.get("content", "")
+        lines.append(f"{role}: {_content_preview(content)}")
+    text = "\n".join(lines)
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+def _content_preview(content: Any, *, max_chars: int = 1200) -> str:
+    if isinstance(content, str):
+        text = content
+    else:
+        text = json.dumps(content, ensure_ascii=False, default=str)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + " [truncated]"

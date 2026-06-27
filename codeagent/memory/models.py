@@ -17,7 +17,9 @@ class MemoryConfig:
     memory_dir: Path = Path(".memory")
     max_items_in_prompt: int = 50
     max_loaded_items: int = 5
+    session_budget_chars: int = 60_000
     max_memory_bytes: int = 50_000
+    selection_mode: str = "llm"
     auto_extract: bool = False
     extract_recent_messages: int = 12
     consolidate_threshold: int = 30
@@ -36,6 +38,7 @@ class MemoryRecord:
     source: str = "manual"
     created_at: str = ""
     updated_at: str = ""
+    filename: str = ""
 
     def clipped_content(self, max_chars: int) -> str:
         if len(self.content) <= max_chars:

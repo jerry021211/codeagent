@@ -83,6 +83,19 @@ class FakeExtractionClient:
         )
 
 
+class FakeSelectionClient:
+    def create_message(self, **kwargs):
+        return ModelResponse(
+            stop_reason="end_turn",
+            content=[
+                {
+                    "type": "text",
+                    "text": '{"selected_memories":["project-style.md"]}',
+                }
+            ],
+        )
+
+
 class MemoryManagerTests(unittest.TestCase):
     def test_manager_can_auto_extract_recent_memories(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -102,6 +115,31 @@ class MemoryManagerTests(unittest.TestCase):
             loaded = store.load("Explain Preference")
             self.assertEqual(loaded.memory_type, "user")
             self.assertIn("call chain", loaded.content)
+
+    def test_manager_selects_memory_files_with_llm_and_loads_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = MemoryStore(Path(temp_dir))
+            store.remember(
+                name="Project Style",
+                memory_type="project",
+                description="Explain call chains before key functions.",
+                content="Always explain the call chain first for this project.",
+            )
+            manager = MemoryManager(
+                store,
+                MemoryConfig(max_loaded_items=5, session_budget_chars=60_000),
+            )
+
+            context = manager.select_context(
+                [{"role": "user", "content": "Explain agent.py"}],
+                client=FakeSelectionClient(),
+                model="deepseek-v4-pro",
+                max_tokens=8000,
+            )
+
+            self.assertIn("Selected long-term memories", context)
+            self.assertIn('file="project-style.md"', context)
+            self.assertIn("Always explain the call chain first", context)
 
 
 if __name__ == "__main__":

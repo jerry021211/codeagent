@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from copy import deepcopy
+from pathlib import Path
 from unittest.mock import patch
 
 from codeagent import (
@@ -14,7 +16,7 @@ from codeagent import (
     ToolRegistry,
 )
 from codeagent.tools import SearchMemoryTool, TodoStore, TodoWriteTool
-from codeagent.memory import MemoryStore
+from codeagent.memory import MemoryConfig, MemoryManager, MemoryStore
 
 
 class FakeClient:
@@ -314,6 +316,56 @@ class AgentTests(unittest.TestCase):
         self.assertIn("Project Style", client.system_prompt)
         self.assertIn("Use long-term memory selectively", client.system_prompt)
 
+    def test_agent_injects_llm_selected_memory_context(self) -> None:
+        class SelectionClient:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def fork(self, **kwargs):
+                return self
+
+            def create_message(self, **kwargs):
+                self.calls.append(deepcopy(kwargs))
+                if len(self.calls) == 1:
+                    return ModelResponse(
+                        stop_reason="end_turn",
+                        content=[
+                            {
+                                "type": "text",
+                                "text": '{"selected_memories":["project-style.md"]}',
+                            }
+                        ],
+                    )
+                return ModelResponse(
+                    stop_reason="end_turn",
+                    content=[{"type": "text", "text": "done"}],
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = MemoryStore(Path(temp_dir))
+            store.remember(
+                name="Project Style",
+                memory_type="project",
+                description="Explain call chains first.",
+                content="For this project, explain the call chain first.",
+            )
+            manager = MemoryManager(store, MemoryConfig(selection_mode="llm"))
+            client = SelectionClient()
+            agent = Agent(
+                client=client,
+                tools=ToolRegistry(),
+                config=AgentConfig(model="deepseek-v4-pro", system_prompt="base prompt"),
+                memory_manager=manager,
+                memory_catalog=manager.catalog_prompt(),
+            )
+
+            agent.run("Explain agent.py")
+
+            self.assertIn("selected_memories", client.calls[0]["messages"][0]["content"])
+            self.assertIn("Selected long-term memories", client.calls[1]["system"])
+            self.assertIn("explain the call chain first", client.calls[1]["system"])
+            self.assertNotIn("Available memories:", client.calls[1]["system"])
+
     def test_environment_config_reads_model_settings(self) -> None:
         with patch.dict(
             "os.environ",
@@ -331,6 +383,8 @@ class AgentTests(unittest.TestCase):
                 "CONTEXT_TOOL_RESULT_BUDGET_CHARS": "111",
                 "ENABLE_MEMORY": "true",
                 "MEMORY_DIR": "project-memory",
+                "MEMORY_SELECTION_MODE": "llm",
+                "MEMORY_SESSION_BUDGET_CHARS": "60000",
                 "MEMORY_AUTO_EXTRACT": "true",
                 "MEMORY_ALLOW_SUBAGENT_WRITE": "true",
             },
@@ -351,6 +405,8 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(env.context_config.tool_result_budget_chars, 111)
         self.assertTrue(env.memory_config.enabled)
         self.assertEqual(str(env.memory_config.memory_dir), "project-memory")
+        self.assertEqual(env.memory_config.selection_mode, "llm")
+        self.assertEqual(env.memory_config.session_budget_chars, 60000)
         self.assertTrue(env.memory_config.auto_extract)
         self.assertTrue(env.memory_config.allow_subagent_write)
 

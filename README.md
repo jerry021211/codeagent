@@ -197,8 +197,16 @@ SKILLS_DIR=.skills
 
 ## 长期记忆：Memory
 
-默认启用轻量级长期记忆。启动时 Agent 只会收到 memory catalog，也就是记忆名称、
-类型和一句话描述；完整内容不会常驻上下文，需要模型主动调用工具按需读取。
+默认启用轻量级长期记忆。每次主模型调用前，Agent 会先发起一次轻量 side-query：
+
+1. 后端列出 memory 的 `filename + name + description` 清单。
+2. 使用当前配置的模型，让它从清单里选择真正有用的记忆文件，最多 5 个。
+3. 模型必须返回严格 JSON，例如 `{"selected_memories":["project-style.md"]}`。
+4. 后端只读取被选中的真实 markdown 文件，把完整内容注入本轮 system prompt。
+5. 单轮注入总预算默认 60KB，避免 memory 把上下文撑爆。
+
+你的项目使用 `deepseek-v4-pro` 时，这个 side-query 也会走同一个 Anthropic-compatible
+客户端和同一个 `MODEL_ID`，不会硬编码 Sonnet。
 
 内置三个 memory 工具：
 
@@ -233,7 +241,9 @@ ENABLE_MEMORY=true
 MEMORY_DIR=.memory
 MEMORY_MAX_ITEMS_IN_PROMPT=50
 MEMORY_MAX_LOADED_ITEMS=5
+MEMORY_SESSION_BUDGET_CHARS=60000
 MEMORY_MAX_MEMORY_BYTES=50000
+MEMORY_SELECTION_MODE=llm
 MEMORY_AUTO_EXTRACT=false
 MEMORY_EXTRACT_RECENT_MESSAGES=12
 MEMORY_CONSOLIDATE_THRESHOLD=30

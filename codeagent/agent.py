@@ -126,8 +126,8 @@ class Agent:
         """Run until the model stops requesting tools or the iteration limit hits."""
 
         if prompt is not None:
-            self.hooks.trigger("UserPromptSubmit", prompt)
-            self.context.record_user_prompt(prompt)
+            self.hooks.trigger("UserPromptSubmit", prompt) #打印日志
+            self.context.record_user_prompt(prompt)   
             self.add_user_message(prompt)
 
         with trace_run(
@@ -153,13 +153,17 @@ class Agent:
                 )
                 reminder = self.hooks.trigger("BeforeModelCall", self.messages)
                 if reminder:
-                    self.add_user_message(str(reminder))
+                    self.add_user_message(str(reminder)) #如果有加入提醒该做todolist了
 
                 tool_schemas = self.tools.schemas()
                 try:
+                    selected_memory_context = self._selected_memory_context()
                     response = self.client.create_message(
                         model=self.config.model,
-                        system=self._system_prompt(tool_schemas),
+                        system=self._system_prompt(
+                            tool_schemas,
+                            selected_memory_context=selected_memory_context,
+                        ),
                         messages=self.messages,
                         tools=tool_schemas,
                         max_tokens=self.config.max_tokens,
@@ -352,7 +356,12 @@ class Agent:
             return registry, hooks, context
         return self._subagent_tools(), self.hooks, ContextManager(config=self.context.config)
 
-    def _system_prompt(self, tool_schemas: list[dict[str, Any]]) -> str:
+    def _system_prompt(
+        self,
+        tool_schemas: list[dict[str, Any]],
+        *,
+        selected_memory_context: str = "",
+    ) -> str:
         system_prompt = self.config.system_prompt
         has_todo_write = any(
             schema.get("name") == "todo_write" for schema in tool_schemas
@@ -376,11 +385,39 @@ class Agent:
             in {SEARCH_MEMORY_TOOL_NAME, LOAD_MEMORY_TOOL_NAME, REMEMBER_TOOL_NAME}
             for schema in tool_schemas
         )
-        if self.memory_catalog and "Available memories:" not in system_prompt:
+        if selected_memory_context:
+            system_prompt = f"{system_prompt}\n\n{selected_memory_context}"
+        elif (
+            self.memory_catalog
+            and "Available memories:" not in system_prompt
+            and (
+                self.memory_manager is None
+                or self.memory_manager.config.selection_mode != "llm"
+            )
+        ):
             system_prompt = f"{system_prompt}\n\n{self.memory_catalog}"
         if has_memory_tools and "long-term memory" not in system_prompt:
             system_prompt = f"{system_prompt}\n\n{MEMORY_SYSTEM_GUIDANCE}"
         return system_prompt
+
+    def _selected_memory_context(self) -> str:
+        if self.memory_manager is None:
+            return ""
+        try:
+            return self.memory_manager.select_context(
+                self.messages,
+                client=self._memory_client(),
+                model=self.config.model,
+                max_tokens=self.config.max_tokens,
+            )
+        except Exception:
+            return ""
+
+    def _memory_client(self) -> Any:
+        fork = getattr(self.client, "fork", None)
+        if callable(fork):
+            return fork(stream=False, on_text=None)
+        return self.client
 
     def _after_turn_memory(self) -> None:
         if self.memory_manager is None:

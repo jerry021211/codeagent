@@ -125,7 +125,7 @@ class TodoWriteTool:
 
         previous = _copy_todos(self.store.todos)
         self.store.replace(normalized)
-        if self.on_change is not None:
+        if self.on_change is not None:  #on_change其实是一个print函数，cli中注册的
             event = render_todo_event(previous, normalized)
             if event is not None:
                 self.on_change(event)
@@ -191,7 +191,7 @@ def _parse_todos_string(value: str) -> tuple[Any, str | None]:
 def render_todo_event(
     previous: list[dict[str, str]],
     current: list[dict[str, str]],
-) -> str | None:
+) -> str | None:  #这个函数是对比todo列表修改后和之前的变化的
     """Render a user-facing todo state transition."""
 
     if previous == current:
@@ -311,7 +311,7 @@ def _todo_marker(status: str) -> str:
     }[status]
 
 
-def _copy_todos(todos: list[dict[str, str]]) -> list[dict[str, str]]:
+def _copy_todos(todos: list[dict[str, str]]) -> list[dict[str, str]]: #浅拷贝就够了
     return [dict(todo) for todo in todos]
 
 
@@ -319,7 +319,7 @@ def create_todo_reminder_hook(
     store: TodoStore,
     *,
     interval: int = 3,
-):
+):  #如果模型做了三步了还没解决，就提醒模型要写todolist了
     """Return a BeforeModelCall hook that nudges stale planning state."""
 
     last_revision = store.revision

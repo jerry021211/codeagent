@@ -53,14 +53,14 @@ class ContextManager:
             return messages
 
         prepared = deepcopy(messages)
-        prepared = self.tool_result_budget(prepared)
-        prepared = self.snip_compact(prepared)
-        prepared = self.micro_compact(prepared)
+        prepared = self.tool_result_budget(prepared) #压缩过大的 tool 输出
+        prepared = self.snip_compact(prepared) #消息数量太多 → 掐头去尾，中间砍掉
+        prepared = self.micro_compact(prepared) # 旧的 tool_result 替换成简短占位符
 
         if self._estimate_chars(prepared) > self.config.compact_threshold_chars:
             prepared = self.compact_history(
                 prepared,
-                reason="auto compact",
+                reason="auto compact", #不参与业务逻辑只是为了观测用，看文件中的reason就知道发生了哪个压缩
                 client=client,
                 model=model,
                 max_tokens=max_tokens,
@@ -124,7 +124,7 @@ class ContextManager:
 
         compacted = self.compact_history(
             messages,
-            reason="reactive compact",
+            reason="reactive compact", 
             client=client,
             model=model,
             max_tokens=max_tokens,
@@ -135,7 +135,7 @@ class ContextManager:
     def reset_reactive_retries(self) -> None:
         self._reactive_retries = 0
 
-    def tool_result_budget(self, messages: list[Message]) -> list[Message]:
+    def tool_result_budget(self, messages: list[Message]) -> list[Message]:  #检查后台工具结构，太长了会保存和剪裁
         if not messages:
             return messages
 
@@ -148,7 +148,7 @@ class ContextManager:
             (index, block)
             for index, block in enumerate(content)
             if isinstance(block, dict) and block.get("type") == "tool_result"
-        ]
+        ] #提取编号和tool result
         total = sum(len(str(block.get("content", ""))) for _, block in blocks)
         if total <= self.config.tool_result_budget_chars:
             return messages
@@ -157,7 +157,8 @@ class ContextManager:
             blocks,
             key=lambda pair: len(str(pair[1].get("content", ""))),
             reverse=True,
-        )
+        ) #从大到小排序
+
         for index, block in ranked:
             if total <= self.config.tool_result_budget_chars:
                 break
@@ -165,13 +166,13 @@ class ContextManager:
             replacement = self._persist_tool_output(
                 str(block.get("tool_use_id", f"tool_result_{index}")),
                 original,
-            )
-            content[index] = {**block, "content": replacement}
+            ) #持久化并在message中替换
+            content[index] = {**block, "content": replacement} #展开block，只替换content内容
             total = sum(
                 len(str(item.get("content", "")))
                 for item in content
                 if isinstance(item, dict) and item.get("type") == "tool_result"
-            )
+            ) #重新计算大小
         return messages
 
     def snip_compact(self, messages: list[Message]) -> list[Message]:
