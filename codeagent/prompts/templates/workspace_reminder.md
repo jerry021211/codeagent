@@ -1,0 +1,1 @@
+Current workspace: {workspace}

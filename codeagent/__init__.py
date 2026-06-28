@@ -8,6 +8,13 @@ from codeagent.hooks import HookManager, create_default_hooks
 from codeagent.memory import MemoryConfig, MemoryManager, MemoryRecord, MemoryStore
 from codeagent.models import ModelResponse
 from codeagent.permissions import PermissionDecision, PermissionPolicy
+from codeagent.prompts import (
+    PromptAssemblyResult,
+    PromptConfig,
+    PromptFragment,
+    PromptMode,
+    PromptRuntime,
+)
 from codeagent.skills import LoadedSkill, SkillLoader, SkillMetadata
 from codeagent.tools import TodoStore, ToolDefinition, ToolRegistry, create_default_registry
 
@@ -27,6 +34,11 @@ __all__ = [
     "ModelResponse",
     "PermissionDecision",
     "PermissionPolicy",
+    "PromptAssemblyResult",
+    "PromptConfig",
+    "PromptFragment",
+    "PromptMode",
+    "PromptRuntime",
     "RuntimeState",
     "LoadedSkill",
     "SkillLoader",

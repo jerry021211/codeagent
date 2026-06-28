@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from codeagent.anthropic_client import AnthropicModelClient
@@ -15,12 +16,10 @@ from codeagent.context import ContextManager
 from codeagent.hooks import HookManager
 from codeagent.memory import MemoryManager
 from codeagent.messages import Message, ToolUse, extract_text, normalize_tool_uses
+from codeagent.prompts import PromptAssemblyResult, PromptMode, PromptRuntime
 from codeagent.tracing import trace_run
 from codeagent.tools import (
     COMPACT_TOOL_NAME,
-    LOAD_MEMORY_TOOL_NAME,
-    REMEMBER_TOOL_NAME,
-    SEARCH_MEMORY_TOOL_NAME,
     TASK_TOOL_NAME,
     CompactTool,
     TaskTool,
@@ -30,43 +29,6 @@ from codeagent.tools import (
 SubagentEnvironment = (
     tuple[ToolRegistry, HookManager]
     | tuple[ToolRegistry, HookManager, ContextManager]
-)
-
-TODO_SYSTEM_GUIDANCE = (
-    "When a task has multiple steps, requires code changes, or may take more "
-    "than one tool call, call todo_write before using read_file, bash, "
-    "write_file, or edit_file. Keep the todo list concise and update it as "
-    "work moves through pending, in_progress, and completed. Keep at most one "
-    "todo in_progress. The todo_write tool is for planning only and does not "
-    "perform work."
-)
-
-TASK_SYSTEM_GUIDANCE = (
-    "Use the task tool for focused subtasks that need their own investigation "
-    "or multiple tool calls. The task tool starts a subagent with a fresh "
-    "message list and returns only the subagent's final conclusion, so do not "
-    "expect its intermediate reasoning or tool history to remain in your "
-    "conversation."
-)
-
-SUBAGENT_SYSTEM_PROMPT = (
-    "You are a focused coding subagent. Complete only the delegated task. "
-    "Use your available tools as needed, then return a concise final "
-    "conclusion for the parent agent. Include important files changed, tests "
-    "run, or blockers when relevant. Do not delegate further."
-)
-
-SKILL_SYSTEM_GUIDANCE = (
-    "Use load_skill(name) only when the user's task matches a listed skill. "
-    "Do not load every skill. Load the most relevant skill before applying "
-    "its specialized workflow."
-)
-
-MEMORY_SYSTEM_GUIDANCE = (
-    "Use long-term memory selectively. Search or load memories when the task "
-    "may depend on prior user preferences, project conventions, or reusable "
-    "decisions. Use remember only for stable facts that should help future "
-    "turns; do not store secrets, temporary task status, or large code blocks."
 )
 
 @dataclass(slots=True)
@@ -103,6 +65,8 @@ class Agent:
     hooks: HookManager = field(default_factory=HookManager)
     context: ContextManager = field(default_factory=ContextManager)
     memory_manager: MemoryManager | None = None
+    prompt_runtime: PromptRuntime | None = None
+    prompt_log: Callable[[str], None] | None = None
     messages: list[Message] = field(default_factory=list)
     allow_subagents: bool = True
     subagent_max_iterations: int = 30
@@ -114,6 +78,8 @@ class Agent:
     _compact_requested: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
+        if self.prompt_runtime is None:
+            self.prompt_runtime = PromptRuntime(workspace=Path.cwd())
         if self.allow_subagents and TASK_TOOL_NAME not in self.tools:
             self.tools.register(TaskTool(spawn_fn=self._spawn_subagent))
         if COMPACT_TOOL_NAME not in self.tools:
@@ -158,13 +124,15 @@ class Agent:
                 tool_schemas = self.tools.schemas()
                 try:
                     selected_memory_context = self._selected_memory_context()
+                    prompt_assembly = self._assemble_prompt(
+                        tool_schemas,
+                        selected_memory_context=selected_memory_context,
+                    )
+                    self._log_prompt_assembly(prompt_assembly)
                     response = self.client.create_message(
                         model=self.config.model,
-                        system=self._system_prompt(
-                            tool_schemas,
-                            selected_memory_context=selected_memory_context,
-                        ),
-                        messages=self.messages,
+                        system=prompt_assembly.system_prompt,
+                        messages=prompt_assembly.apply_reminders(self.messages),
                         tools=tool_schemas,
                         max_tokens=self.config.max_tokens,
                     )
@@ -294,12 +262,15 @@ class Agent:
                     tools=sub_tools,
                     config=AgentConfig(
                         model=self.config.model,
-                        system_prompt=SUBAGENT_SYSTEM_PROMPT,
+                        system_prompt=self.config.system_prompt,
                         max_tokens=self.config.max_tokens,
                         max_iterations=self.subagent_max_iterations,
                     ),
                     hooks=sub_hooks,
                     context=sub_context,
+                    memory_manager=None,
+                    prompt_runtime=self.prompt_runtime,
+                    prompt_log=self.prompt_log,
                     allow_subagents=False,
                     subagent_log=self.subagent_log,
                     skill_catalog=self.skill_catalog,
@@ -362,45 +333,50 @@ class Agent:
         *,
         selected_memory_context: str = "",
     ) -> str:
-        system_prompt = self.config.system_prompt
-        has_todo_write = any(
-            schema.get("name") == "todo_write" for schema in tool_schemas
-        )
-        if has_todo_write and "todo_write" not in system_prompt:
-            system_prompt = f"{system_prompt}\n\n{TODO_SYSTEM_GUIDANCE}"
+        return self._assemble_prompt(
+            tool_schemas,
+            selected_memory_context=selected_memory_context,
+        ).system_prompt
 
-        has_task = any(
-            schema.get("name") == TASK_TOOL_NAME for schema in tool_schemas
-        )
-        if has_task and "task tool" not in system_prompt:
-            system_prompt = f"{system_prompt}\n\n{TASK_SYSTEM_GUIDANCE}"
-
-        if self.skill_catalog and "Available skills:" not in system_prompt:
-            system_prompt = (
-                f"{system_prompt}\n\n{self.skill_catalog}\n\n{SKILL_SYSTEM_GUIDANCE}"
-            )
-
-        has_memory_tools = any(
-            schema.get("name")
-            in {SEARCH_MEMORY_TOOL_NAME, LOAD_MEMORY_TOOL_NAME, REMEMBER_TOOL_NAME}
-            for schema in tool_schemas
-        )
-        if selected_memory_context:
-            system_prompt = f"{system_prompt}\n\n{selected_memory_context}"
-        elif (
-            self.memory_catalog
-            and "Available memories:" not in system_prompt
-            and (
-                self.memory_manager is None
-                or self.memory_manager.config.selection_mode != "llm"
-            )
+    def _assemble_prompt(
+        self,
+        tool_schemas: list[dict[str, Any]],
+        *,
+        selected_memory_context: str = "",
+    ) -> PromptAssemblyResult:
+        memory_catalog = self.memory_catalog
+        if (
+            self.memory_manager is not None
+            and self.memory_manager.config.selection_mode == "llm"
+            and not selected_memory_context
         ):
-            system_prompt = f"{system_prompt}\n\n{self.memory_catalog}"
-        if has_memory_tools and "long-term memory" not in system_prompt:
-            system_prompt = f"{system_prompt}\n\n{MEMORY_SYSTEM_GUIDANCE}"
-        return system_prompt
+            memory_catalog = ""
 
-    def _selected_memory_context(self) -> str:
+        assert self.prompt_runtime is not None
+        return self.prompt_runtime.assemble(
+            mode=self._prompt_mode(),
+            base_system_prompt=self.config.system_prompt,
+            model=self.config.model,
+            tool_schemas=tool_schemas,
+            selected_memory_context=selected_memory_context,
+            memory_catalog=memory_catalog,
+            skill_catalog=self.skill_catalog,
+        )
+
+    def _prompt_mode(self) -> PromptMode:
+        return PromptMode.NORMAL if self.allow_subagents else PromptMode.SUBAGENT
+
+    def _log_prompt_assembly(self, assembly: PromptAssemblyResult) -> None:
+        if self.prompt_log is None:
+            return
+        fragments = ", ".join(item.id for item in assembly.trace)
+        cache = " cache_hit" if assembly.cache_hit else ""
+        self.prompt_log(
+            f"[prompt] hash={assembly.prompt_hash} chars={len(assembly.system_prompt)} "
+            f"fragments={len(assembly.trace)}{cache}: {fragments}"
+        )
+
+    def _selected_memory_context(self) -> str:  #调用memory的manager去用llm选择memory
         if self.memory_manager is None:
             return ""
         try:
@@ -413,7 +389,7 @@ class Agent:
         except Exception:
             return ""
 
-    def _memory_client(self) -> Any:
+    def _memory_client(self) -> Any: #注入memory的client
         fork = getattr(self.client, "fork", None)
         if callable(fork):
             return fork(stream=False, on_text=None)

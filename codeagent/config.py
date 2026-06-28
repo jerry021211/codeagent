@@ -11,6 +11,7 @@ from codeagent.agent import AgentConfig
 from codeagent.anthropic_client import AnthropicModelClient
 from codeagent.context import ContextConfig
 from codeagent.memory import MemoryConfig
+from codeagent.prompts import PromptConfig
 
 
 def _load_dotenv() -> None:
@@ -59,12 +60,13 @@ class EnvironmentConfig:
     base_url: str | None = None
     max_tokens: int = 8000
     max_iterations: int = 50
-    system_prompt: str = "You are a coding agent. Use tools to solve tasks."
+    system_prompt: str = "You are a coding agent. Use tools to solve tasks." #初始化的prompt
     stream: bool = False
     enable_skills: bool = True
     skill_roots: tuple[Path, ...] = (Path(".skills"),)
     context_config: ContextConfig = field(default_factory=ContextConfig)
     memory_config: MemoryConfig = field(default_factory=MemoryConfig)
+    prompt_config: PromptConfig = field(default_factory=PromptConfig)
 
     @classmethod
     def from_env(cls) -> "EnvironmentConfig":
@@ -126,6 +128,23 @@ class EnvironmentConfig:
                 consolidate_mode=os.getenv("MEMORY_CONSOLIDATE_MODE", "simple"),
                 allow_subagent_write=_bool_env("MEMORY_ALLOW_SUBAGENT_WRITE", False),
             ),
+            prompt_config=PromptConfig(
+                template_dir=_optional_path_env("PROMPT_TEMPLATE_DIR"),
+                system_budget_chars=_int_env("SYSTEM_PROMPT_BUDGET_CHARS", 120_000),
+                static_budget_chars=_int_env(
+                    "SYSTEM_PROMPT_STATIC_BUDGET_CHARS", 50_000
+                ),
+                dynamic_budget_chars=_int_env(
+                    "SYSTEM_PROMPT_DYNAMIC_BUDGET_CHARS", 70_000
+                ),
+                skill_catalog_budget_chars=_int_env(
+                    "SKILL_CATALOG_BUDGET_CHARS", 12_000
+                ),
+                context_summary_budget_chars=_int_env(
+                    "CONTEXT_SUMMARY_BUDGET_CHARS", 12_000
+                ),
+                emit_trace=_bool_env("PROMPT_TRACE", False),
+            ),
         )
 
     def to_agent_config(self) -> AgentConfig:
@@ -160,6 +179,11 @@ def _required_env(name: str) -> str:
 def _optional_env(name: str) -> str | None:
     value = os.getenv(name)
     return value or None
+
+
+def _optional_path_env(name: str) -> Path | None:
+    value = _optional_env(name)
+    return Path(value) if value is not None else None
 
 
 def _first_optional_env(*names: str) -> str | None:

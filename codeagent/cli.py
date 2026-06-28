@@ -11,6 +11,7 @@ from codeagent import (
     EnvironmentConfig,
     MemoryManager,
     MemoryStore,
+    PromptRuntime,
     SkillLoader,
     TodoStore,
     create_default_hooks,
@@ -48,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     todo_store = TodoStore()
     context = ContextManager(config=env.context_config, todo_store=todo_store)
+    prompt_runtime = PromptRuntime(workspace=workspace, config=env.prompt_config)
     agent = Agent(
         client=env.create_anthropic_client(
             stream=stream,
@@ -64,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
         hooks=create_default_hooks(workspace=workspace, todo_store=todo_store),
         context=context,
         memory_manager=memory_manager,
+        prompt_runtime=prompt_runtime,
+        prompt_log=print if env.prompt_config.emit_trace else None,
         subagent_environment_factory=lambda: create_default_subagent_environment(
             workspace,
             skill_loader,

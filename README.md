@@ -146,6 +146,51 @@ CLI 会在进入和退出子 Agent 时输出显式标志：
 python -m codeagent --no-stream "请必须调用 task 工具，让子 Agent 读取 README.md 并总结这个项目的用途；拿到子 Agent 结果后，再用一句话告诉我结论。"
 ```
 
+## 运行时 System Prompt 组装
+
+Agent 不再在 `agent.py` 里硬编码 todo、subagent、skill、memory 等 prompt 文案。
+每次模型调用前会通过 `PromptRuntime` 运行时组装 system prompt：
+
+```text
+Agent 收集真实运行状态
+-> PromptProvider 产出 PromptFragment
+-> PromptAssembler 按 section、priority、budget 组装
+-> 返回 system prompt + system-reminder 消息 + trace/hash
+```
+
+Prompt 分三类：
+
+- `static`：稳定身份和执行规则，尽量保持不变，方便未来接 API prompt cache。
+- `dynamic`：根据真实状态注入的工具、todo、task、skill、memory、context 内容。
+- `reminder`：当前日期、工作区等运行时事实，作为 `<system-reminder>` 用户消息临时注入。
+
+内置模板在：
+
+```text
+codeagent/prompts/templates/
+```
+
+项目可以用 `.prompts/*.md` 覆盖内置模板，例如：
+
+```text
+.prompts/todo.md
+```
+
+可配置项：
+
+```bash
+PROMPT_TEMPLATE_DIR=.prompts
+SYSTEM_PROMPT_BUDGET_CHARS=120000
+SYSTEM_PROMPT_STATIC_BUDGET_CHARS=50000
+SYSTEM_PROMPT_DYNAMIC_BUDGET_CHARS=70000
+SKILL_CATALOG_BUDGET_CHARS=12000
+CONTEXT_SUMMARY_BUDGET_CHARS=12000
+PROMPT_TRACE=false
+```
+
+打开 `PROMPT_TRACE=true` 后，CLI 会打印每次组装的 prompt hash、字符数和包含的
+fragment，方便调试和复现。
+
 ## 按需能力：Skill Loading
 
 默认启用两级 Skill Loading：

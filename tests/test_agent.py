@@ -130,9 +130,11 @@ class AgentTests(unittest.TestCase):
         result = agent.run("delegate this")
 
         self.assertEqual(result.final_text, "parent final")
-        self.assertEqual(client.calls[1]["messages"], [
-            {"role": "user", "content": "inspect the project"}
-        ])
+        self.assertEqual(
+            client.calls[1]["messages"][0],
+            {"role": "user", "content": "inspect the project"},
+        )
+        self.assertIn("system-reminder", client.calls[1]["messages"][1]["content"])
         subagent_tool_names = {tool["name"] for tool in client.calls[1]["tools"]}
         self.assertIn("echo", subagent_tool_names)
         self.assertNotIn("task", subagent_tool_names)
