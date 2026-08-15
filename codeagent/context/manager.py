@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from codeagent.context.models import ContextConfig, RuntimeState
+from codeagent.events import EventEmitter
 from codeagent.messages import Message, ToolUse
 from codeagent.tools.todo import TodoStore
 
@@ -48,6 +49,7 @@ class ContextManager:
         client: Any | None = None,
         model: str = "",
         max_tokens: int = 8000,
+        event_emitter: EventEmitter | None = None,
     ) -> list[Message]:
         if self.config.mode == "off":
             return messages
@@ -64,6 +66,7 @@ class ContextManager:
                 client=client,
                 model=model,
                 max_tokens=max_tokens,
+                event_emitter=event_emitter,
             )
         return prepared
 
@@ -101,6 +104,7 @@ class ContextManager:
         model: str = "",
         max_tokens: int = 8000,
         reason: str = "manual compact",
+        event_emitter: EventEmitter | None = None,
     ) -> list[Message]:
         return self.compact_history(
             messages,
@@ -108,6 +112,7 @@ class ContextManager:
             client=client,
             model=model,
             max_tokens=max_tokens,
+            event_emitter=event_emitter,
         )
 
     def reactive_compact(
@@ -117,6 +122,7 @@ class ContextManager:
         client: Any | None = None,
         model: str = "",
         max_tokens: int = 8000,
+        event_emitter: EventEmitter | None = None,
     ) -> list[Message] | None:
         if self._reactive_retries >= self.config.reactive_retries:
             return None
@@ -128,6 +134,7 @@ class ContextManager:
             client=client,
             model=model,
             max_tokens=max_tokens,
+            event_emitter=event_emitter,
         )
         tail = self._safe_tail(messages, self.config.keep_reactive_tail_messages)
         return compacted + tail
@@ -224,11 +231,22 @@ class ContextManager:
         client: Any | None = None,
         model: str = "",
         max_tokens: int = 8000,
+        event_emitter: EventEmitter | None = None,
     ) -> list[Message]:
         if self.config.mode == "off":
             return messages
 
         transcript = self.write_transcript(messages, reason=reason)
+        if event_emitter is not None:
+            event_emitter.emit(
+                "context.compacted",
+                {
+                    "reason": reason,
+                    "mode": self.config.mode,
+                    "message_count_before": len(messages),
+                    "transcript": str(transcript),
+                },
+            )
         runtime_summary = self.state.render_summary(self._todo_summary())
         model_summary = ""
 

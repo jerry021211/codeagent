@@ -7,7 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from codeagent import AnthropicModelClient, EnvironmentConfig
+from codeagent import (
+    AnthropicModelClient,
+    CallbackEventSink,
+    EnvironmentConfig,
+    EventEmitter,
+    UsageTracker,
+)
 
 
 class FakeMessages:
@@ -86,6 +92,8 @@ class AnthropicClientTests(unittest.TestCase):
             sdk_client.messages.last_create_params["tools"][0]["input_schema"],
             {},
         )
+        self.assertIsNotNone(response.usage)
+        self.assertFalse(response.usage.available)
 
     def test_streaming_create_message_emits_text_and_returns_final_message(self) -> None:
         final_message = SimpleNamespace(
@@ -112,6 +120,66 @@ class AnthropicClientTests(unittest.TestCase):
         self.assertEqual(response.stop_reason, "end_turn")
         self.assertEqual(response.content, [{"type": "text", "text": "hello world"}])
         self.assertEqual(sdk_client.messages.last_stream_params["model"], "claude-test")
+
+    def test_normalizes_usage_and_emits_model_events(self) -> None:
+        final_message = SimpleNamespace(
+            model="claude-test",
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text="done")],
+            usage=SimpleNamespace(
+                input_tokens=11,
+                output_tokens=7,
+                cache_creation_input_tokens=3,
+                cache_read_input_tokens=5,
+            ),
+        )
+        events = []
+        tracker = UsageTracker()
+        client = AnthropicModelClient(
+            sdk_client=FakeSdkClient(final_message),
+            event_emitter=EventEmitter(CallbackEventSink(events.append)),
+            usage_tracker=tracker,
+            call_kind="memory_select",
+        )
+
+        response = client.create_message(
+            model="claude-test",
+            system="system",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            max_tokens=100,
+        )
+
+        self.assertIsNotNone(response.usage)
+        assert response.usage is not None
+        self.assertEqual(response.usage.total_tokens, 26)
+        self.assertEqual(response.usage.call_kind, "memory_select")
+        self.assertEqual(tracker.snapshot().total_tokens, 26)
+        self.assertEqual(
+            [event.type for event in events],
+            ["model.started", "model.completed", "usage.updated"],
+        )
+
+    def test_fork_shares_usage_tracker_and_can_override_call_kind(self) -> None:
+        final_message = SimpleNamespace(
+            stop_reason="end_turn",
+            content=[],
+            usage={"input_tokens": 2, "output_tokens": 1},
+        )
+        tracker = UsageTracker()
+        client = AnthropicModelClient(
+            sdk_client=FakeSdkClient(final_message),
+            usage_tracker=tracker,
+        )
+
+        forked = client.fork(stream=False, call_kind="subagent")
+        response = forked.create_message(
+            model="test", system="", messages=[], tools=[], max_tokens=10
+        )
+
+        assert response.usage is not None
+        self.assertEqual(response.usage.call_kind, "subagent")
+        self.assertEqual(tracker.snapshot().model_calls, 1)
 
 
 class EnvironmentConfigTests(unittest.TestCase):

@@ -5,11 +5,11 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from codeagent.tools.base import ToolDefinition
-
-_cwd: str | None = None
+from codeagent.tools.workspace import WorkspaceGuard, WorkspaceViolationError
 
 _DANGEROUS_PATTERNS = [
     (r"\brm\s+(-\w*)?-r\w*\s+(/|~|\$HOME)", "recursive delete on home/root"),
@@ -24,7 +24,7 @@ _DANGEROUS_PATTERNS = [
 ]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class BashTool:
     """Execute shell commands with basic safety checks and output truncation."""
 
@@ -49,10 +49,23 @@ class BashTool:
             "required": ["command"],
         },
     )
+    workspace_guard: WorkspaceGuard | None = None
+    _cwd: Path | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._cwd = (
+            self.workspace_guard.root
+            if self.workspace_guard is not None
+            else Path.cwd().resolve()
+        )
+
+    @property
+    def cwd(self) -> Path:
+        """Return this tool instance's current working directory."""
+
+        return self._cwd or Path.cwd().resolve()
 
     def run(self, command: str, timeout: int = 120) -> str:
-        global _cwd
-
         warning = _check_dangerous(command)
         if warning:
             return (
@@ -61,7 +74,13 @@ class BashTool:
                 "If intentional, modify the command to be more specific."
             )
 
-        cwd = _cwd or os.getcwd()
+        cwd = self.cwd
+
+        if self.workspace_guard is not None:
+            try:
+                self._validate_directory_changes(command, cwd)
+            except WorkspaceViolationError as exc:
+                return f"Blocked: {exc}"
 
         try:
             proc = subprocess.run(
@@ -70,11 +89,11 @@ class BashTool:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=cwd,
+                cwd=str(cwd),
             )
 
             if proc.returncode == 0:
-                _update_cwd(command, cwd)
+                self._update_cwd(command, cwd)
 
             output = proc.stdout
             if proc.stderr:
@@ -93,6 +112,30 @@ class BashTool:
         except Exception as exc:
             return f"Error running command: {exc}"
 
+    def _validate_directory_changes(self, command: str, current_cwd: Path) -> None:
+        """Reject explicit ``cd`` targets outside a guarded workspace pre-run."""
+
+        assert self.workspace_guard is not None
+        for target in _cd_targets(command):
+            current_cwd = self.workspace_guard.resolve(target, base=current_cwd)
+
+    def _update_cwd(self, command: str, current_cwd: Path) -> None:
+        """Apply successful shell ``cd`` operations to this instance only."""
+
+        for target in _cd_targets(command):
+            if self.workspace_guard is not None:
+                new_dir = self.workspace_guard.resolve(target, base=current_cwd)
+            else:
+                expanded = Path(os.path.expanduser(target))
+                new_dir = (
+                    expanded.resolve()
+                    if expanded.is_absolute()
+                    else (current_cwd / expanded).resolve()
+                )
+            if new_dir.is_dir():
+                self._cwd = new_dir
+                current_cwd = new_dir
+
 
 def _check_dangerous(command: str) -> str | None:
     for pattern, reason in _DANGEROUS_PATTERNS:
@@ -101,17 +144,18 @@ def _check_dangerous(command: str) -> str | None:
     return None
 
 
-def _update_cwd(command: str, current_cwd: str) -> None:
-    global _cwd
+def _cd_targets(command: str) -> list[str]:
+    """Extract simple persistent ``cd`` operations from a compound command."""
 
-    parts = command.split("&&")
+    targets: list[str] = []
+    parts = re.split(r"(?:&&|;)", command)
     for part in parts:
         part = part.strip()
-        if not part.startswith("cd "):
+        match = re.match(r"^(?:cd|chdir)\s+(?:/d\s+)?(.+?)\s*$", part, re.IGNORECASE)
+        if match is None:
             continue
-        target = part[3:].strip().strip("'\"")
+        target = match.group(1).strip().strip("'\"")
         if not target:
             continue
-        new_dir = os.path.normpath(os.path.join(current_cwd, os.path.expanduser(target)))
-        if os.path.isdir(new_dir):
-            _cwd = new_dir
+        targets.append(target)
+    return targets

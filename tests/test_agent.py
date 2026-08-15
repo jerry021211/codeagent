@@ -12,6 +12,8 @@ from codeagent import (
     EnvironmentConfig,
     HookManager,
     ModelResponse,
+    RecoveryConfig,
+    RecoveryRuntime,
     ToolDefinition,
     ToolRegistry,
 )
@@ -368,6 +370,39 @@ class AgentTests(unittest.TestCase):
             self.assertIn("explain the call chain first", client.calls[1]["system"])
             self.assertNotIn("Available memories:", client.calls[1]["system"])
 
+    def test_agent_recovers_from_max_tokens_by_retrying_with_more_tokens(self) -> None:
+        client = SequenceClient(
+            [
+                ModelResponse(
+                    stop_reason="max_tokens",
+                    content=[{"type": "text", "text": "partial"}],
+                ),
+                ModelResponse(
+                    stop_reason="end_turn",
+                    content=[{"type": "text", "text": "done"}],
+                ),
+            ]
+        )
+        agent = Agent(
+            client=client,
+            tools=ToolRegistry(),
+            config=AgentConfig(
+                model="fake-model",
+                system_prompt="test",
+                max_tokens=100,
+            ),
+            recovery_runtime=RecoveryRuntime(
+                RecoveryConfig(escalated_max_tokens=1000, sleep_enabled=False)
+            ),
+        )
+
+        result = agent.run("write a long answer")
+
+        self.assertEqual(result.final_text, "done")
+        self.assertEqual(client.calls[0]["max_tokens"], 100)
+        self.assertEqual(client.calls[1]["max_tokens"], 1000)
+        self.assertNotIn({"role": "assistant", "content": [{"type": "text", "text": "partial"}]}, agent.messages)
+
     def test_environment_config_reads_model_settings(self) -> None:
         with patch.dict(
             "os.environ",
@@ -389,6 +424,11 @@ class AgentTests(unittest.TestCase):
                 "MEMORY_SESSION_BUDGET_CHARS": "60000",
                 "MEMORY_AUTO_EXTRACT": "true",
                 "MEMORY_ALLOW_SUBAGENT_WRITE": "true",
+                "RECOVERY_ENABLED": "true",
+                "RECOVERY_MAX_RETRIES": "4",
+                "RECOVERY_ESCALATED_MAX_TOKENS": "9000",
+                "FALLBACK_MODEL_ID": "fallback-model",
+                "RECOVERY_TRACE": "true",
             },
             clear=True,
         ):
@@ -411,6 +451,11 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(env.memory_config.session_budget_chars, 60000)
         self.assertTrue(env.memory_config.auto_extract)
         self.assertTrue(env.memory_config.allow_subagent_write)
+        self.assertTrue(env.recovery_config.enabled)
+        self.assertEqual(env.recovery_config.max_retries, 4)
+        self.assertEqual(env.recovery_config.escalated_max_tokens, 9000)
+        self.assertEqual(env.recovery_config.fallback_model, "fallback-model")
+        self.assertTrue(env.recovery_config.trace)
 
 
 if __name__ == "__main__":

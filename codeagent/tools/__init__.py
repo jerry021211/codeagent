@@ -29,6 +29,7 @@ from codeagent.tools.todo import (
     render_todo_final_status,
 )
 from codeagent.tools.write import WriteFileTool
+from codeagent.tools.workspace import WorkspaceGuard, WorkspaceViolationError
 
 __all__ = [
     "BashTool",
@@ -55,6 +56,8 @@ __all__ = [
     "ToolRegistry",
     "TodoWriteTool",
     "WriteFileTool",
+    "WorkspaceGuard",
+    "WorkspaceViolationError",
     "create_default_registry",
     "create_todo_final_status_hook",
     "create_todo_reminder_hook",

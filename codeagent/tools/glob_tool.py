@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from codeagent.tools.base import ToolDefinition
+from codeagent.tools.workspace import WorkspaceGuard
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,14 +34,21 @@ class GlobTool:
             "required": ["pattern"],
         },
     )
+    workspace_guard: WorkspaceGuard | None = None
 
     def run(self, pattern: str, path: str = ".") -> str:
         try:
-            base = Path(path).expanduser().resolve()
+            if self.workspace_guard is not None:
+                base = self.workspace_guard.resolve(path)
+                pattern = self.workspace_guard.validate_pattern(pattern)
+            else:
+                base = Path(path).expanduser().resolve()
             if not base.is_dir():
                 return f"Error: {path} is not a directory"
 
             hits = list(base.glob(pattern))
+            if self.workspace_guard is not None:
+                hits = [hit for hit in hits if self.workspace_guard.allows(hit)]
             hits.sort(
                 key=lambda candidate: (
                     candidate.stat().st_mtime if candidate.exists() else 0

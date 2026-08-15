@@ -86,17 +86,25 @@ class PermissionPolicyTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "Permission denied by user")
 
-    def test_denies_workspace_escape_when_user_rejects(self) -> None:
+    def test_denies_workspace_escape_without_offering_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
+            prompts = 0
+
+            def ask(tool_name, tool_input, reason):
+                nonlocal prompts
+                prompts += 1
+                return True
+
             policy = PermissionPolicy(
                 workspace=Path(temp_dir),
-                ask=lambda tool_name, tool_input, reason: False,
+                ask=ask,
             )
 
             decision = policy.check("write_file", {"file_path": "../outside.txt"})
 
         self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "Permission denied by user")
+        self.assertEqual(decision.reason, "Writing outside workspace")
+        self.assertEqual(prompts, 0)
 
     def test_allows_workspace_write(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from codeagent.tools.base import ToolDefinition
+from codeagent.tools.workspace import WorkspaceGuard
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,10 +38,15 @@ class ReadFileTool:
             "required": ["file_path"],
         },
     )
+    workspace_guard: WorkspaceGuard | None = None
 
     def run(self, file_path: str, offset: int = 1, limit: int = 2000) -> str:
         try:
-            path = Path(file_path).expanduser().resolve()
+            path = (
+                self.workspace_guard.resolve(file_path)
+                if self.workspace_guard is not None
+                else Path(file_path).expanduser().resolve()
+            )
             if not path.exists():
                 return f"Error: {file_path} not found"
             if not path.is_file():

@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --canvas: 247 248 251; --surface: 255 255 255; --surface-muted: 248 249 252; --surface-strong: 238 241 247;
+  --ink: 23 30 43; --ink-muted: 91 103 124; --ink-faint: 147 158 177; --line: 226 230 238; --line-strong: 210 216 228;
+  --accent: 72 113 247; --accent-strong: 53 91 221; --success: 30 165 117; --warning: 224 153 36; --danger: 222 73 85;
+  --sidebar: 13 18 29; --sidebar-ink: 225 230 240; --sidebar-muted: 128 142 165; --code: 19 25 37; --code-ink: 213 221 236;
+  --user-bubble: 34 43 60; --user-bubble-ink: 247 249 253;
+}
+
+.dark {
+  color-scheme: dark;
+  --canvas: 8 11 18; --surface: 13 18 29; --surface-muted: 17 24 39; --surface-strong: 25 34 50;
+  --ink: 230 234 242; --ink-muted: 146 158 180; --ink-faint: 89 102 124; --line: 33 43 59; --line-strong: 48 61 81;
+  --accent: 101 136 255; --accent-strong: 124 154 255; --success: 54 195 142; --warning: 237 171 54; --danger: 242 91 104;
+  --sidebar: 6 9 15; --sidebar-ink: 224 230 240; --sidebar-muted: 116 132 158; --code: 5 8 14; --code-ink: 201 211 230;
+  --user-bubble: 57 82 169; --user-bubble-ink: 250 251 255;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; height: 100%; }
+body { margin: 0; overflow: hidden; background: rgb(var(--canvas)); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+button, textarea, input { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+.scrollbar-thin { scrollbar-width: thin; scrollbar-color: rgb(var(--line-strong)) transparent; }
+.scrollbar-thin::-webkit-scrollbar { width: 7px; height: 7px; }
+.scrollbar-thin::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: rgb(var(--line-strong)); background-clip: padding-box; }
+
+@layer components {
+  .markdown > :first-child { margin-top: 0; }
+  .markdown > :last-child { margin-bottom: 0; }
+  .markdown p { margin: 0.65rem 0; }
+  .markdown h1, .markdown h2, .markdown h3 { margin: 1.1rem 0 0.5rem; color: rgb(var(--ink)); font-weight: 650; line-height: 1.35; }
+  .markdown h1 { font-size: 1.15rem; } .markdown h2 { font-size: 1.02rem; } .markdown h3 { font-size: 0.93rem; }
+  .markdown ul, .markdown ol { margin: 0.6rem 0; padding-left: 1.35rem; } .markdown ul { list-style: disc; } .markdown ol { list-style: decimal; } .markdown li { margin: 0.2rem 0; }
+  .markdown blockquote { margin: 0.8rem 0; border-left: 2px solid rgb(var(--accent)); padding-left: 0.9rem; color: rgb(var(--ink-muted)); }
+  .markdown a { color: rgb(var(--accent)); text-decoration: underline; text-underline-offset: 2px; }
+  .markdown code:not(pre code) { border: 1px solid rgb(var(--line)); border-radius: 0.35rem; background: rgb(var(--surface-strong)); padding: 0.1rem 0.3rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82em; }
+  .markdown pre { margin: 0.8rem 0; max-width: 100%; overflow-x: auto; border: 1px solid rgb(var(--line)); border-radius: 0.75rem; background: rgb(var(--code)); padding: 0.85rem; color: rgb(var(--code-ink)); }
+  .markdown pre code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.76rem; line-height: 1.6; }
+  .markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.78rem; }
+  .markdown th, .markdown td { border: 1px solid rgb(var(--line)); padding: 0.35rem 0.55rem; text-align: left; } .markdown th { background: rgb(var(--surface-muted)); }
+  .markdown hr { margin: 1rem 0; border: 0; border-top: 1px solid rgb(var(--line)); }
+}
+
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; } }

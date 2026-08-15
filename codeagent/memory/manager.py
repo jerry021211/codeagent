@@ -6,17 +6,27 @@ import json
 from pathlib import Path
 from typing import Any
 
+from codeagent.events import EventEmitter
 from codeagent.memory.models import MEMORY_TYPES, MemoryConfig, MemoryRecord
 from codeagent.memory.store import MemoryStore
 from codeagent.messages import Message, extract_text
+from codeagent.recovery import RecoveryRuntime
+from codeagent.runtime import CancellationToken
 
 
 class MemoryManager:
     """Coordinates memory prompt exposure and optional maintenance."""
 
-    def __init__(self, store: MemoryStore, config: MemoryConfig | None = None) -> None:
+    def __init__(
+        self,
+        store: MemoryStore,
+        config: MemoryConfig | None = None,
+        *,
+        recovery_runtime: RecoveryRuntime | None = None,
+    ) -> None:
         self.store = store
         self.config = config or MemoryConfig()
+        self.recovery_runtime = recovery_runtime
 
     def catalog_prompt(self) -> str:
         return self.store.catalog_prompt(max_items=self.config.max_items_in_prompt)
@@ -28,6 +38,8 @@ class MemoryManager:
         client: Any | None,
         model: str,
         max_tokens: int,
+        event_emitter: EventEmitter | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> str:
         if not self.config.enabled or self.config.selection_mode != "llm":
             return ""
@@ -44,6 +56,8 @@ class MemoryManager:
             client=client,
             model=model,
             max_tokens=max_tokens,
+            event_emitter=event_emitter,
+            cancellation=cancellation,
         )
         if not selected:
             return ""
@@ -60,13 +74,18 @@ class MemoryManager:
         if not self.config.enabled:
             return
         if self.config.auto_extract and client is not None:
+            extract_client = _fork_client(client, "memory_extract")
             self.extract_from_recent_messages(
                 messages,
-                client=client,
+                client=extract_client,
                 model=model,
                 max_tokens=max_tokens,
             )
-        self.consolidate_if_needed(client=client, model=model, max_tokens=max_tokens)
+        self.consolidate_if_needed(
+            client=_fork_client(client, "memory_consolidate"),
+            model=model,
+            max_tokens=max_tokens,
+        )
 
     def extract_from_recent_messages(
         self,
@@ -211,18 +230,46 @@ class MemoryManager:
         client: Any,
         model: str,
         max_tokens: int,
+        event_emitter: EventEmitter | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> list[str]:
         prompt = _memory_selection_prompt(records, messages)
-        response = client.create_message(
-            model=model,
-            system=(
-                "You select useful long-term memory files for a coding agent. "
-                "Return strict JSON only."
-            ),
-            messages=[{"role": "user", "content": prompt}],
-            tools=[],
-            max_tokens=min(max_tokens, 800),
+        side_messages = [{"role": "user", "content": prompt}]
+        system = (
+            "You select useful long-term memory files for a coding agent. "
+            "Return strict JSON only."
         )
+        side_max_tokens = min(max_tokens, 800)
+        if self.recovery_runtime is not None:
+            state = self.recovery_runtime.create_state(
+                model=model,
+                max_tokens=side_max_tokens,
+            )
+            result = self.recovery_runtime.call_model(
+                lambda call_model, call_max_tokens, call_messages: client.create_message(
+                    model=call_model,
+                    system=system,
+                    messages=call_messages,
+                    tools=[],
+                    max_tokens=call_max_tokens,
+                ),
+                state=state,
+                messages=side_messages,
+                side_query=True,
+                event_emitter=event_emitter,
+                cancellation=cancellation,
+            )
+            if result.response is None:
+                return []
+            response = result.response
+        else:
+            response = client.create_message(
+                model=model,
+                system=system,
+                messages=side_messages,
+                tools=[],
+                max_tokens=side_max_tokens,
+            )
         payload = _parse_json_object(extract_text(response.content))
         selected = payload.get("selected_memories")
         if not isinstance(selected, list):
@@ -312,6 +359,15 @@ def _render_selected_memory(record: MemoryRecord) -> str:
         f"{record.content}\n"
         "</memory>"
     )
+
+
+def _fork_client(client: Any | None, call_kind: str) -> Any | None:
+    if client is None:
+        return None
+    fork = getattr(client, "fork", None)
+    if not callable(fork):
+        return client
+    return fork(stream=False, on_text=None, call_kind=call_kind)
 
 
 def _memory_consolidation_prompt(records: list[MemoryRecord]) -> str:

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from codeagent.tools.base import ToolDefinition
+from codeagent.tools.workspace import WorkspaceGuard
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", "dist", "build"}
 
@@ -40,6 +41,7 @@ class GrepTool:
             "required": ["pattern"],
         },
     )
+    workspace_guard: WorkspaceGuard | None = None
 
     def run(self, pattern: str, path: str = ".", include: str | None = None) -> str:
         try:
@@ -47,7 +49,15 @@ class GrepTool:
         except re.error as exc:
             return f"Invalid regex: {exc}"
 
-        base = Path(path).expanduser().resolve()
+        try:
+            if self.workspace_guard is not None:
+                base = self.workspace_guard.resolve(path)
+                if include is not None:
+                    include = self.workspace_guard.validate_pattern(include)
+            else:
+                base = Path(path).expanduser().resolve()
+        except Exception as exc:
+            return f"Error: {exc}"
         if not base.exists():
             return f"Error: {path} not found"
 
@@ -55,6 +65,10 @@ class GrepTool:
         matches: list[str] = []
 
         for file_path in files:
+            if self.workspace_guard is not None and not self.workspace_guard.allows(
+                file_path
+            ):
+                continue
             try:
                 text = file_path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
@@ -68,11 +82,12 @@ class GrepTool:
 
         return "\n".join(matches) if matches else "No matches found."
 
-    @staticmethod
-    def _walk(root: Path, include: str | None) -> list[Path]:
+    def _walk(self, root: Path, include: str | None) -> list[Path]:
         results: list[Path] = []
         for item in root.rglob(include or "*"):
             if any(part in _SKIP_DIRS for part in item.parts):
+                continue
+            if self.workspace_guard is not None and not self.workspace_guard.allows(item):
                 continue
             if item.is_file():
                 results.append(item)

@@ -8,6 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from codeagent.permissions.broker import PermissionBroker
+from codeagent.runtime import CancellationToken
+
 
 @dataclass(frozen=True, slots=True)
 class PermissionDecision:
@@ -32,6 +35,9 @@ class PermissionPolicy:
 
     workspace: Path = field(default_factory=Path.cwd)
     ask: AskUser = ask_user
+    broker: PermissionBroker | None = None
+    cancellation: CancellationToken | None = None
+    approval_timeout: float | None = 600.0
 
     hard_deny_patterns: tuple[str, ...] = (
         # POSIX shell: destructive system operations.
@@ -96,15 +102,26 @@ class PermissionPolicy:
                 return PermissionDecision(False, reason)
 
             reason = self._destructive_command_reason(command)
-            if reason and not self.ask(tool_name, tool_input, reason):
+            if reason and not self._ask(tool_name, tool_input, reason):
                 return PermissionDecision(False, "Permission denied by user")
 
         if tool_name in self.write_tools:
             reason = self._workspace_write_reason(tool_input)
-            if reason and not self.ask(tool_name, tool_input, reason):
-                return PermissionDecision(False, "Permission denied by user")
+            if reason:
+                return PermissionDecision(False, reason)
 
         return PermissionDecision(True)
+
+    def _ask(self, tool_name: str, tool_input: dict[str, Any], reason: str) -> bool:
+        if self.broker is not None:
+            return self.broker.request(
+                tool_name,
+                tool_input,
+                reason,
+                cancellation=self.cancellation,
+                timeout=self.approval_timeout,
+            )
+        return self.ask(tool_name, tool_input, reason)
 
     def _hard_deny_reason(self, command: str) -> str:
         normalized = command.casefold()
@@ -129,7 +146,15 @@ class PermissionPolicy:
         if not target.is_absolute():
             target = self.workspace / target
         try:
-            target.resolve().relative_to(self.workspace.resolve())
-        except ValueError:
+            workspace = self.workspace.resolve()
+            resolved = target.resolve()
+            resolved.relative_to(workspace)
+            # Resolve existing ancestors as well so a not-yet-created child of
+            # an escaping symlink/junction cannot bypass the workspace check.
+            ancestor = resolved if resolved.exists() else resolved.parent
+            while not ancestor.exists() and ancestor != ancestor.parent:
+                ancestor = ancestor.parent
+            ancestor.resolve().relative_to(workspace)
+        except (OSError, ValueError):
             return "Writing outside workspace"
         return ""

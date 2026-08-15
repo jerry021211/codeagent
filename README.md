@@ -20,17 +20,62 @@ codeagent/
   tools/            # 工具定义与注册表
   permissions/      # 工具执行权限策略
   hooks/            # agent lifecycle hooks
-  context/          # context 管理占位
-  prompts/          # system prompt 组装占位
-  skills/           # skill 加载占位
-  memory/           # 记忆系统占位
+  context/          # 上下文预算、压缩与 checkpoint 状态
+  prompts/          # system prompt 动态组装
+  skills/           # skill catalog 与按需加载
+  memory/           # Markdown 长期记忆与模型选择
   tasks/            # 任务系统占位
   runtime/          # 后台任务/运行时占位
   teams/            # 多 agent 通讯占位
   worktrees/        # worktree 隔离占位
   mcp/              # MCP 路由占位
-  recovery/         # 错误恢复占位
+  recovery/         # 分类、退避、fallback 与续写恢复
+  events/           # 结构化运行事件与 Token 计量
+  web/              # SQLite、FIFO 调度器与 FastAPI/SSE transport
 ```
+
+说明：仓库中的 Web 运行时已是实际实现；`mcp/`、`teams/`、`worktrees/` 和旧的
+`runtime/background.py` 仍是后续扩展点，不参与当前页面执行链路。
+
+## Web 工作台
+
+项目现在包含一个本机单用户 Coding Cockpit：左侧管理会话，中间显示对话、
+流式回复和 Agent 动作，右侧展示 Token、TODO、子 Agent、恢复记录、文件改动与
+脱敏后的调试事件。消息、Run、审批、模型调用用量、事件流和 checkpoint 持久化在
+启动目录的 `.codeagent/state.db`。新建对话时可以从页面选择任意已有的本机项目
+目录；每个对话永久绑定自己的工作区，后续执行使用该目录专属的 Agent 和工具状态。
+
+安装并构建：
+
+```powershell
+python -m pip install -e ".[web]"
+Set-Location web
+npm.cmd install
+npm.cmd run build
+Set-Location ..
+```
+
+启动（只监听本机）：
+
+```powershell
+codeagent-web --workspace . --port 8765
+```
+
+然后访问 `http://127.0.0.1:8765`。开发前端时，可另开终端运行
+`npm.cmd run dev`；Vite 会把 `/api` 代理到 8765 端口。
+
+Web 运行时有以下边界：
+
+- `--workspace` 是数据存储位置和新对话的默认目录，不再是唯一可打开的项目。
+- 所有文件和搜索工具限制在当前对话绑定的工作区内，并防止符号链接逃逸。
+- 根任务使用 FIFO 串行队列；不同工作区不共享可变的 Agent/Tool/CWD 状态。
+- 工作区浏览 API 只列出本机目录名，不读取文件内容，并拒绝 UNC/网络路径。
+- 危险操作通过页面审批；取消在模型调用、工具调用和退避等待之间的安全边界生效。
+- SSE 事件带持久化序号，断线后可以继续回放；未完成 Run 在进程重启后标记为
+  `interrupted`，不会盲目重放可能产生副作用的操作。
+- Token 使用量来自 provider 返回的真实 usage，并按主模型、memory、context、
+  子 Agent 等 `call_kind` 汇总；provider 不返回 usage 时明确标记为不可用。
+- 调试面板不会展示完整 system prompt 或隐藏推理内容，事件 payload 会截断和脱敏。
 
 ## 环境配置
 
@@ -190,6 +235,46 @@ PROMPT_TRACE=false
 
 打开 `PROMPT_TRACE=true` 后，CLI 会打印每次组装的 prompt hash、字符数和包含的
 fragment，方便调试和复现。
+
+## 错误恢复：Error Recovery
+
+Agent 使用独立的 `RecoveryRuntime` 保护模型调用。它不是简单 `try/except`，
+而是把异常或特殊 `stop_reason` 分类成 `RecoveryReason`，再根据当前
+`RecoveryState` 做恢复决策。
+
+覆盖的主要路径：
+
+- `429 rate limit`：指数退避 + jitter 后重试，尊重 `Retry-After`。
+- `529 overloaded`：指数退避；连续多次 overloaded 后可切换 `FALLBACK_MODEL_ID`。
+- `timeout/network/5xx`：有限重试。
+- `prompt too long/context length/413`：触发 `ContextManager.reactive_compact()` 后重试。
+- `max_tokens`：第一次提升输出 token 上限；仍截断时追加 continuation prompt 续写。
+- `401/403/invalid request/invalid model/schema error`：不可恢复，快速失败。
+
+主模型调用使用完整 recovery；memory selection side-query 使用轻量 recovery，失败时返回空
+memory context，不影响主任务。工具执行错误不进入 recovery，而是作为 `tool_result`
+返回给模型自我修正。
+
+常用配置：
+
+```bash
+RECOVERY_ENABLED=true
+FALLBACK_MODEL_ID=
+RECOVERY_TRACE=false
+```
+
+高级配置：
+
+```bash
+RECOVERY_MAX_RETRIES=10
+RECOVERY_BASE_DELAY_MS=500
+RECOVERY_MAX_DELAY_MS=32000
+RECOVERY_JITTER_RATIO=0.25
+RECOVERY_MAX_CONTINUATIONS=3
+RECOVERY_ESCALATED_MAX_TOKENS=64000
+RECOVERY_OVERLOAD_FALLBACK_AFTER=3
+RECOVERY_SIDE_QUERY_MAX_RETRIES=2
+```
 
 ## 按需能力：Skill Loading
 

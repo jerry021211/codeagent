@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import difflib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from codeagent.tools.base import ToolDefinition
-
-_changed_files: set[str] = set()
+from codeagent.tools.workspace import WorkspaceGuard
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,10 +40,16 @@ class EditFileTool:
             "required": ["file_path", "old_string", "new_string"],
         },
     )
+    workspace_guard: WorkspaceGuard | None = None
+    changed_files: set[str] = field(default_factory=set, repr=False)
 
     def run(self, file_path: str, old_string: str, new_string: str) -> str:
         try:
-            path = Path(file_path).expanduser().resolve()
+            path = (
+                self.workspace_guard.resolve(file_path)
+                if self.workspace_guard is not None
+                else Path(file_path).expanduser().resolve()
+            )
             if not path.exists():
                 return f"Error: {file_path} not found"
             if not path.is_file():
@@ -67,7 +72,7 @@ class EditFileTool:
 
             new_content = content.replace(old_string, new_string, 1)
             path.write_text(new_content, encoding="utf-8")
-            _changed_files.add(str(path))
+            self.changed_files.add(str(path))
 
             diff = _unified_diff(content, new_content, str(path))
             return f"Edited {file_path}\n{diff}"

@@ -19,6 +19,7 @@ from codeagent.tools.skill import LoadSkillTool
 from codeagent.tools.task import TaskTool
 from codeagent.tools.todo import TodoStore, TodoWriteTool
 from codeagent.tools.write import WriteFileTool
+from codeagent.tools.workspace import WorkspaceGuard
 
 
 def default_tools(
@@ -31,15 +32,24 @@ def default_tools(
     memory_max_items: int = 5,
     compact_fn: Callable[[], str] | None = None,
     task_spawn_fn: Callable[[str], str] | None = None,
+    workspace_guard: WorkspaceGuard | None = None,
+    changed_files: set[str] | None = None,
 ) -> list[Tool]:
     store = todo_store or TodoStore()
+    file_changes = changed_files if changed_files is not None else set()
     tools: list[Tool] = [
-        BashTool(),
-        ReadFileTool(),
-        WriteFileTool(),
-        EditFileTool(),
-        GlobTool(),
-        GrepTool(),
+        BashTool(workspace_guard=workspace_guard),
+        ReadFileTool(workspace_guard=workspace_guard),
+        WriteFileTool(
+            workspace_guard=workspace_guard,
+            changed_files=file_changes,
+        ),
+        EditFileTool(
+            workspace_guard=workspace_guard,
+            changed_files=file_changes,
+        ),
+        GlobTool(workspace_guard=workspace_guard),
+        GrepTool(workspace_guard=workspace_guard),
         TodoWriteTool(store=store, on_change=todo_log),
     ]
     if skill_loader is not None:
@@ -66,6 +76,8 @@ def create_default_registry(
     memory_max_items: int = 5,
     compact_fn: Callable[[], str] | None = None,
     task_spawn_fn: Callable[[str], str] | None = None,
+    workspace_guard: WorkspaceGuard | None = None,
+    changed_files: set[str] | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in default_tools(
@@ -77,6 +89,8 @@ def create_default_registry(
         memory_max_items=memory_max_items,
         compact_fn=compact_fn,
         task_spawn_fn=task_spawn_fn,
+        workspace_guard=workspace_guard,
+        changed_files=changed_files,
     ):
         registry.register(tool)
     return registry

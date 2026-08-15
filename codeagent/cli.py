@@ -12,6 +12,7 @@ from codeagent import (
     MemoryManager,
     MemoryStore,
     PromptRuntime,
+    RecoveryRuntime,
     SkillLoader,
     TodoStore,
     create_default_hooks,
@@ -38,9 +39,17 @@ def main(argv: list[str] | None = None) -> int:
     workspace = Path.cwd()
     skill_loader = create_skill_loader(env, workspace)
     skill_catalog = skill_loader.catalog_prompt() if skill_loader is not None else ""
+    recovery_runtime = RecoveryRuntime(
+        env.recovery_config,
+        log=print if env.recovery_config.trace else None,
+    )
     memory_store = create_memory_store(env, workspace)
     memory_manager = (
-        MemoryManager(memory_store, env.memory_config)
+        MemoryManager(
+            memory_store,
+            env.memory_config,
+            recovery_runtime=recovery_runtime,
+        )
         if memory_store is not None
         else None
     )
@@ -68,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         memory_manager=memory_manager,
         prompt_runtime=prompt_runtime,
         prompt_log=print if env.prompt_config.emit_trace else None,
+        recovery_runtime=recovery_runtime,
         subagent_environment_factory=lambda: create_default_subagent_environment(
             workspace,
             skill_loader,

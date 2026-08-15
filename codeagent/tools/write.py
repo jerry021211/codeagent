@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from codeagent.tools.base import ToolDefinition
-from codeagent.tools.edit import _changed_files
+from codeagent.tools.workspace import WorkspaceGuard
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,13 +34,19 @@ class WriteFileTool:
             "required": ["file_path", "content"],
         },
     )
+    workspace_guard: WorkspaceGuard | None = None
+    changed_files: set[str] = field(default_factory=set, repr=False)
 
     def run(self, file_path: str, content: str) -> str:
         try:
-            path = Path(file_path).expanduser().resolve()
+            path = (
+                self.workspace_guard.resolve(file_path)
+                if self.workspace_guard is not None
+                else Path(file_path).expanduser().resolve()
+            )
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
-            _changed_files.add(str(path))
+            self.changed_files.add(str(path))
             line_count = content.count("\n")
             if content and not content.endswith("\n"):
                 line_count += 1
