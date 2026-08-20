@@ -8,6 +8,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from codeagent.runtime_platform import RuntimePlatform, current_runtime_platform
 from codeagent.tools.base import ToolDefinition
 from codeagent.tools.workspace import WorkspaceGuard, WorkspaceViolationError
 
@@ -26,33 +27,38 @@ _DANGEROUS_PATTERNS = [
 
 @dataclass(slots=True)
 class BashTool:
-    """Execute shell commands with basic safety checks and output truncation."""
+    """Execute commands in the detected native shell with basic safety checks."""
 
-    definition: ToolDefinition = ToolDefinition(
-        name="bash",
-        description=(
-            "Execute a shell command. Returns stdout, stderr, and exit code. "
-            "Use this for running tests, installing packages, git operations, etc."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The shell command to run",
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "Timeout in seconds (default 120)",
-                },
-            },
-            "required": ["command"],
-        },
-    )
+    runtime_platform: RuntimePlatform = field(default_factory=current_runtime_platform)
     workspace_guard: WorkspaceGuard | None = None
+    definition: ToolDefinition = field(init=False)
     _cwd: Path | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.definition = ToolDefinition(
+            name="bash",
+            description=(
+                f"Execute a command on {self.runtime_platform.operating_system} using "
+                f"{self.runtime_platform.shell_name}. Returns stdout, stderr, and exit "
+                "code. Use syntax appropriate for that shell."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": (
+                            f"The {self.runtime_platform.shell_name} command to run"
+                        ),
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (default 120)",
+                    },
+                },
+                "required": ["command"],
+            },
+        )
         self._cwd = (
             self.workspace_guard.root
             if self.workspace_guard is not None
@@ -84,8 +90,8 @@ class BashTool:
 
         try:
             proc = subprocess.run(
-                command,
-                shell=True,
+                self.runtime_platform.command_argv(command),
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=timeout,

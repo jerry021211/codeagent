@@ -11,7 +11,7 @@ const EVENT_NAMES = [
   "tool_requested", "tool_waiting_approval", "tool_started", "tool_completed", "tool_failed", "tool_blocked",
   "approval_requested", "approval_allowed", "approval_denied", "approval_expired",
   "todo_updated", "subagent_started", "subagent_completed", "subagent_failed",
-  "recovery_retrying", "recovery_completed", "recovery_failed", "context_compacted", "prompt_assembled",
+  "recovery_retrying", "recovery_completed", "recovery_failed", "context_compacted", "history_rewritten", "prompt_assembled",
 ].flatMap((name) => [name, name.replaceAll("_", ".")]);
 
 export function useRunEvents(runId?: string | null) {

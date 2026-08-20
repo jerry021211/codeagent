@@ -1,5 +1,21 @@
-"""Task system extension point."""
+"""Task-system domain contracts."""
 
-from codeagent.tasks.models import TaskRecord
+from codeagent.tasks.models import (
+    JsonValue,
+    TaskActivityRecord,
+    TaskListRecord,
+    TaskListScope,
+    TaskRecord,
+    TaskResource,
+    TaskStatus,
+)
 
-__all__ = ["TaskRecord"]
+__all__ = [
+    "JsonValue",
+    "TaskActivityRecord",
+    "TaskListRecord",
+    "TaskListScope",
+    "TaskRecord",
+    "TaskResource",
+    "TaskStatus",
+]

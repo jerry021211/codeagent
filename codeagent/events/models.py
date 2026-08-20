@@ -58,12 +58,28 @@ class TokenUsage:
             + self.cache_read_input_tokens
         )
 
+    @property
+    def prompt_input_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+        )
+
+    @property
+    def cache_hit_ratio(self) -> float:
+        if self.prompt_input_tokens == 0:
+            return 0.0
+        return self.cache_read_input_tokens / self.prompt_input_tokens
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_creation_input_tokens": self.cache_creation_input_tokens,
             "cache_read_input_tokens": self.cache_read_input_tokens,
+            "prompt_input_tokens": self.prompt_input_tokens,
+            "cache_hit_ratio": self.cache_hit_ratio,
             "total_tokens": self.total_tokens,
             "provider": self.provider,
             "model": self.model,
@@ -93,6 +109,20 @@ class TokenTotals:
             + self.cache_read_input_tokens
         )
 
+    @property
+    def prompt_input_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+        )
+
+    @property
+    def cache_hit_ratio(self) -> float:
+        if self.prompt_input_tokens == 0:
+            return 0.0
+        return self.cache_read_input_tokens / self.prompt_input_tokens
+
     def delta(self, previous: "TokenTotals") -> "TokenTotals":
         return TokenTotals(
             input_tokens=max(0, self.input_tokens - previous.input_tokens),
@@ -112,12 +142,14 @@ class TokenTotals:
             ),
         )
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, int | float | bool]:
         return {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_creation_input_tokens": self.cache_creation_input_tokens,
             "cache_read_input_tokens": self.cache_read_input_tokens,
+            "prompt_input_tokens": self.prompt_input_tokens,
+            "cache_hit_ratio": self.cache_hit_ratio,
             "total_tokens": self.total_tokens,
             "model_calls": self.model_calls,
             "unavailable_calls": self.unavailable_calls,

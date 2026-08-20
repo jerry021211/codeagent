@@ -21,6 +21,14 @@ from typing import Any, Iterator, Protocol
 from uuid import uuid4
 
 from codeagent.events import RunEvent, TokenUsage, redact_payload, utc_now_iso
+from codeagent.tasks import (
+    TaskActivityRecord,
+    TaskListRecord,
+    TaskListScope,
+    TaskRecord,
+    TaskResource,
+    TaskStatus,
+)
 from codeagent.web.models import (
     ApprovalRecord,
     CheckpointRecord,
@@ -40,6 +48,8 @@ RUN_STATUSES = ACTIVE_RUN_STATUSES | TERMINAL_RUN_STATUSES
 APPROVAL_DECISIONS = frozenset({"allow", "deny"})
 APPROVAL_STATUSES = frozenset({"pending", "allowed", "denied", "expired"})
 MODEL_CALL_STATUSES = frozenset({"running", "completed", "failed", "cancelled"})
+TASK_STATUSES = frozenset(item.value for item in TaskStatus)
+TASK_LIST_SCOPES = frozenset(item.value for item in TaskListScope)
 
 _UNSET = object()
 
@@ -179,7 +189,8 @@ class SQLiteRepository:
             workspace TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            archived_at TEXT
+            archived_at TEXT,
+            active_task_list_id TEXT
         );
 
         CREATE TABLE IF NOT EXISTS runs (
@@ -293,6 +304,70 @@ class SQLiteRepository:
         );
         CREATE INDEX IF NOT EXISTS checkpoints_conversation_idx
             ON checkpoints(conversation_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS task_lists (
+            id TEXT PRIMARY KEY,
+            workspace TEXT NOT NULL,
+            name TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            origin_conversation_id TEXT,
+            next_task_number INTEGER NOT NULL DEFAULT 1,
+            revision INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            archived_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS task_lists_workspace_idx
+            ON task_lists(workspace, archived_at, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_list_id TEXT NOT NULL REFERENCES task_lists(id) ON DELETE CASCADE,
+            id TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            description TEXT NOT NULL,
+            active_form TEXT,
+            owner TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            revision INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(task_list_id, id)
+        );
+        CREATE INDEX IF NOT EXISTS tasks_list_status_idx
+            ON tasks(task_list_id, status, CAST(id AS INTEGER));
+        CREATE UNIQUE INDEX IF NOT EXISTS one_in_progress_task_per_owner
+            ON tasks(task_list_id, owner)
+            WHERE status = 'in_progress' AND owner IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS task_dependencies (
+            task_list_id TEXT NOT NULL REFERENCES task_lists(id) ON DELETE CASCADE,
+            blocker_id TEXT NOT NULL,
+            blocked_id TEXT NOT NULL,
+            PRIMARY KEY(task_list_id, blocker_id, blocked_id),
+            FOREIGN KEY(task_list_id, blocker_id)
+                REFERENCES tasks(task_list_id, id) ON DELETE CASCADE,
+            FOREIGN KEY(task_list_id, blocked_id)
+                REFERENCES tasks(task_list_id, id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS task_dependencies_blocked_idx
+            ON task_dependencies(task_list_id, blocked_id);
+
+        CREATE TABLE IF NOT EXISTS task_activity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_list_id TEXT NOT NULL REFERENCES task_lists(id) ON DELETE CASCADE,
+            task_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            conversation_id TEXT,
+            run_id TEXT,
+            agent_id TEXT,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS task_activity_list_idx
+            ON task_activity(task_list_id, id);
+        CREATE INDEX IF NOT EXISTS task_activity_task_idx
+            ON task_activity(task_list_id, task_id, id DESC);
         """
         with self._lock:
             self._ensure_open()
@@ -308,7 +383,40 @@ class SQLiteRepository:
                     "ALTER TABLE conversations "
                     "ADD COLUMN workspace TEXT NOT NULL DEFAULT ''"
                 )
-            self._connection.execute("PRAGMA user_version = 2")
+            if "active_task_list_id" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE conversations ADD COLUMN active_task_list_id TEXT"
+                )
+            legacy_conversations = self._connection.execute(
+                """
+                SELECT id, title, workspace, created_at, updated_at
+                FROM conversations WHERE active_task_list_id IS NULL
+                """
+            ).fetchall()
+            for conversation in legacy_conversations:
+                task_list_id = _new_id("tasklist")
+                self._connection.execute(
+                    """
+                    INSERT INTO task_lists(
+                        id, workspace, name, scope, origin_conversation_id,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_list_id,
+                        str(conversation["workspace"] or ""),
+                        f"{conversation['title']} tasks",
+                        TaskListScope.CONVERSATION_PRIVATE.value,
+                        str(conversation["id"]),
+                        str(conversation["created_at"]),
+                        str(conversation["updated_at"]),
+                    ),
+                )
+                self._connection.execute(
+                    "UPDATE conversations SET active_task_list_id = ? WHERE id = ?",
+                    (task_list_id, conversation["id"]),
+                )
+            self._connection.execute("PRAGMA user_version = 3")
 
     def close(self) -> None:
         with self._lock:
@@ -364,6 +472,28 @@ class SQLiteRepository:
                     ) VALUES (?, ?, ?, ?, ?)
                     """,
                     (identifier, clean_title, workspace_value, now, now),
+                )
+                task_list_id = _new_id("tasklist")
+                connection.execute(
+                    """
+                    INSERT INTO task_lists(
+                        id, workspace, name, scope, origin_conversation_id,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_list_id,
+                        workspace_value,
+                        f"{clean_title} tasks",
+                        TaskListScope.CONVERSATION_PRIVATE.value,
+                        identifier,
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE conversations SET active_task_list_id = ? WHERE id = ?",
+                    (task_list_id, identifier),
                 )
         except sqlite3.IntegrityError as exc:
             raise StorageConflictError(
@@ -443,6 +573,15 @@ class SQLiteRepository:
                 raise RecordNotFoundError(
                     f"Conversation not found: {conversation_id}"
                 )
+            if archived is not _UNSET and bool(archived):
+                connection.execute(
+                    """
+                    UPDATE tasks SET status = 'pending', owner = NULL,
+                        revision = revision + 1, updated_at = ?
+                    WHERE status = 'in_progress' AND owner LIKE ?
+                    """,
+                    (utc_now_iso(), f"{conversation_id}:%"),
+                )
         return self._require_conversation(conversation_id)
 
     def bind_unassigned_workspaces(self, workspace: str | Path) -> int:
@@ -456,6 +595,10 @@ class SQLiteRepository:
                 "UPDATE conversations SET workspace = ? WHERE workspace = ''",
                 (value,),
             )
+            connection.execute(
+                "UPDATE task_lists SET workspace = ? WHERE workspace = ''",
+                (value,),
+            )
         return max(0, cursor.rowcount)
 
     def delete_conversation(self, conversation_id: str) -> bool:
@@ -464,6 +607,682 @@ class SQLiteRepository:
                 "DELETE FROM conversations WHERE id = ?", (conversation_id,)
             )
         return cursor.rowcount > 0
+
+    # Task lists and tasks ---------------------------------------------
+
+    def ensure_conversation_task_list(self, conversation_id: str) -> TaskListRecord:
+        conversation = self._require_conversation(conversation_id)
+        if conversation.active_task_list_id:
+            record = self.get_task_list(conversation.active_task_list_id)
+            if record is not None and record.archived_at is None:
+                return record
+        now = utc_now_iso()
+        identifier = _new_id("tasklist")
+        with self._transaction(immediate=True) as connection:
+            current = connection.execute(
+                "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            if current is None:
+                raise RecordNotFoundError(f"Conversation not found: {conversation_id}")
+            if current["active_task_list_id"]:
+                existing = connection.execute(
+                    "SELECT * FROM task_lists WHERE id = ?",
+                    (current["active_task_list_id"],),
+                ).fetchone()
+                if existing is not None and existing["archived_at"] is None:
+                    return _row_to_task_list(existing)
+            connection.execute(
+                """
+                INSERT INTO task_lists(
+                    id, workspace, name, scope, origin_conversation_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    identifier,
+                    str(current["workspace"] or ""),
+                    f"{current['title']} tasks",
+                    TaskListScope.CONVERSATION_PRIVATE.value,
+                    conversation_id,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE conversations SET active_task_list_id = ?, updated_at = ? WHERE id = ?",
+                (identifier, now, conversation_id),
+            )
+        return self._require_task_list(identifier)
+
+    def create_task_list(
+        self,
+        *,
+        workspace: str | Path,
+        name: str,
+        scope: str = TaskListScope.CONVERSATION_PRIVATE.value,
+        origin_conversation_id: str | None = None,
+        task_list_id: str | None = None,
+    ) -> TaskListRecord:
+        clean_name = str(name).strip()
+        if not clean_name:
+            raise ValueError("Task list name cannot be empty")
+        _validate_choice("task list scope", scope, TASK_LIST_SCOPES)
+        identifier = task_list_id or _new_id("tasklist")
+        now = utc_now_iso()
+        with self._transaction(immediate=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO task_lists(
+                    id, workspace, name, scope, origin_conversation_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    identifier,
+                    str(workspace),
+                    clean_name,
+                    scope,
+                    origin_conversation_id,
+                    now,
+                    now,
+                ),
+            )
+        return self._require_task_list(identifier)
+
+    def get_task_list(self, task_list_id: str) -> TaskListRecord | None:
+        with self._lock:
+            self._ensure_open()
+            row = self._connection.execute(
+                "SELECT * FROM task_lists WHERE id = ?", (task_list_id,)
+            ).fetchone()
+        return _row_to_task_list(row) if row else None
+
+    def _require_task_list(self, task_list_id: str) -> TaskListRecord:
+        record = self.get_task_list(task_list_id)
+        if record is None:
+            raise RecordNotFoundError(f"Task list not found: {task_list_id}")
+        return record
+
+    def list_task_lists(
+        self,
+        *,
+        workspace: str | Path | None = None,
+        include_archived: bool = False,
+    ) -> list[TaskListRecord]:
+        conditions: list[str] = []
+        parameters: list[Any] = []
+        if workspace is not None:
+            conditions.append("workspace = ?")
+            parameters.append(str(workspace))
+        if not include_archived:
+            conditions.append("archived_at IS NULL")
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self._lock:
+            rows = self._connection.execute(
+                f"SELECT * FROM task_lists {where} ORDER BY updated_at DESC, id DESC",
+                parameters,
+            ).fetchall()
+        return [_row_to_task_list(row) for row in rows]
+
+    def update_task_list(
+        self,
+        task_list_id: str,
+        *,
+        name: str | object = _UNSET,
+        promote: bool = False,
+        archived: bool | object = _UNSET,
+        expected_revision: int | None = None,
+    ) -> TaskListRecord:
+        now = utc_now_iso()
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM task_lists WHERE id = ?", (task_list_id,)
+            ).fetchone()
+            if row is None:
+                raise RecordNotFoundError(f"Task list not found: {task_list_id}")
+            if expected_revision is not None and int(row["revision"]) != expected_revision:
+                raise StorageConflictError("Task list revision conflict")
+            values = {
+                "name": str(row["name"]),
+                "scope": str(row["scope"]),
+                "archived_at": row["archived_at"],
+            }
+            if name is not _UNSET:
+                clean_name = str(name).strip()
+                if not clean_name:
+                    raise ValueError("Task list name cannot be empty")
+                values["name"] = clean_name
+            if promote:
+                values["scope"] = TaskListScope.WORKSPACE_SHARED.value
+            if archived is not _UNSET:
+                values["archived_at"] = now if bool(archived) else None
+            connection.execute(
+                """
+                UPDATE task_lists
+                SET name = ?, scope = ?, archived_at = ?, revision = revision + 1,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    values["name"],
+                    values["scope"],
+                    values["archived_at"],
+                    now,
+                    task_list_id,
+                ),
+            )
+        self._notify_activity()
+        return self._require_task_list(task_list_id)
+
+    def bind_conversation_task_list(
+        self,
+        conversation_id: str,
+        task_list_id: str,
+    ) -> ConversationRecord:
+        with self._transaction(immediate=True) as connection:
+            conversation = connection.execute(
+                "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            task_list = connection.execute(
+                "SELECT * FROM task_lists WHERE id = ?", (task_list_id,)
+            ).fetchone()
+            if conversation is None:
+                raise RecordNotFoundError(f"Conversation not found: {conversation_id}")
+            if task_list is None or task_list["archived_at"] is not None:
+                raise RecordNotFoundError(f"Task list not found: {task_list_id}")
+            if str(conversation["workspace"] or "") != str(task_list["workspace"]):
+                raise StorageConflictError("Conversation and task list use different workspaces")
+            if (
+                task_list["scope"] == TaskListScope.CONVERSATION_PRIVATE.value
+                and task_list["origin_conversation_id"] != conversation_id
+            ):
+                raise StorageConflictError("Private task list cannot be bound to another conversation")
+            owner_prefix = f"{conversation_id}:%"
+            busy = connection.execute(
+                """
+                SELECT 1 FROM tasks
+                WHERE task_list_id = ? AND status = 'in_progress' AND owner LIKE ?
+                LIMIT 1
+                """,
+                (conversation["active_task_list_id"], owner_prefix),
+            ).fetchone()
+            if busy is not None and conversation["active_task_list_id"] != task_list_id:
+                raise StorageConflictError("Release the current in-progress task before switching lists")
+            now = utc_now_iso()
+            connection.execute(
+                "UPDATE conversations SET active_task_list_id = ?, updated_at = ? WHERE id = ?",
+                (task_list_id, now, conversation_id),
+            )
+        return self._require_conversation(conversation_id)
+
+    def create_task(
+        self,
+        task_list_id: str,
+        *,
+        subject: str,
+        description: str,
+        active_form: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        conversation_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> TaskResource:
+        clean_subject = str(subject).strip()
+        clean_description = str(description).strip()
+        if not clean_subject or not clean_description:
+            raise ValueError("Task subject and description cannot be empty")
+        now = utc_now_iso()
+        with self._transaction(immediate=True) as connection:
+            task_list = connection.execute(
+                "SELECT * FROM task_lists WHERE id = ?", (task_list_id,)
+            ).fetchone()
+            if task_list is None or task_list["archived_at"] is not None:
+                raise RecordNotFoundError(f"Task list not found: {task_list_id}")
+            task_id = str(int(task_list["next_task_number"]))
+            connection.execute(
+                """
+                INSERT INTO tasks(
+                    task_list_id, id, subject, description, active_form,
+                    metadata_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_list_id,
+                    task_id,
+                    clean_subject,
+                    clean_description,
+                    _clean_optional(active_form),
+                    _json_dumps(dict(metadata or {})),
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE task_lists
+                SET next_task_number = next_task_number + 1,
+                    revision = revision + 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, task_list_id),
+            )
+            self._insert_task_activity(
+                connection,
+                task_list_id=task_list_id,
+                task_id=task_id,
+                event_type="created",
+                conversation_id=conversation_id,
+                run_id=run_id,
+                agent_id=agent_id,
+                payload={"subject": clean_subject},
+                created_at=now,
+            )
+        self._notify_activity()
+        return self.get_task_resource(task_list_id, task_id)
+
+    def get_task_resource(self, task_list_id: str, task_id: str) -> TaskResource:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM tasks WHERE task_list_id = ? AND id = ?",
+                (task_list_id, str(task_id)),
+            ).fetchone()
+            if row is None:
+                raise RecordNotFoundError(f"Task not found: {task_id}")
+            return self._row_to_task_resource(row)
+
+    def list_task_resources(
+        self,
+        task_list_id: str,
+        *,
+        status: str | None = None,
+        owner: str | None = None,
+    ) -> list[TaskResource]:
+        self._require_task_list(task_list_id)
+        conditions = ["task_list_id = ?"]
+        parameters: list[Any] = [task_list_id]
+        if status is not None:
+            _validate_choice("task status", status, TASK_STATUSES)
+            conditions.append("status = ?")
+            parameters.append(status)
+        if owner is not None:
+            conditions.append("owner = ?")
+            parameters.append(owner)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT * FROM tasks WHERE {' AND '.join(conditions)}
+                ORDER BY CAST(id AS INTEGER), id
+                """,
+                parameters,
+            ).fetchall()
+            return [self._row_to_task_resource(row) for row in rows]
+
+    def update_task(
+        self,
+        task_list_id: str,
+        task_id: str,
+        *,
+        changes: Mapping[str, Any],
+        expected_revision: int | None = None,
+        actor_owner: str | None = None,
+        conversation_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        human_override: bool = False,
+    ) -> TaskResource:
+        allowed = {
+            "subject", "description", "active_form", "owner", "status", "metadata",
+            "add_blocks", "add_blocked_by", "remove_blocks", "remove_blocked_by",
+        }
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"Unknown task fields: {', '.join(sorted(unknown))}")
+        if not changes:
+            return self.get_task_resource(task_list_id, task_id)
+        now = utc_now_iso()
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE task_list_id = ? AND id = ?",
+                (task_list_id, str(task_id)),
+            ).fetchone()
+            if row is None:
+                raise RecordNotFoundError(f"Task not found: {task_id}")
+            if expected_revision is not None and int(row["revision"]) != expected_revision:
+                raise StorageConflictError("Task revision conflict")
+
+            subject = str(changes.get("subject", row["subject"])).strip()
+            description = str(changes.get("description", row["description"])).strip()
+            if not subject or not description:
+                raise ValueError("Task subject and description cannot be empty")
+            active_form = (
+                _clean_optional(changes["active_form"])
+                if "active_form" in changes
+                else row["active_form"]
+            )
+            old_owner = row["owner"]
+            owner = changes.get("owner", old_owner)
+            if owner is not None:
+                owner = str(owner).strip() or None
+            status_value = str(changes.get("status", row["status"]))
+            _validate_choice("task status", status_value, TASK_STATUSES)
+
+            if not human_override and "owner" in changes:
+                if owner not in {None, actor_owner}:
+                    raise StorageConflictError("Agent cannot assign a task to another owner")
+                if old_owner not in {None, actor_owner}:
+                    raise StorageConflictError("Task is owned by another agent")
+            if status_value == TaskStatus.IN_PROGRESS.value:
+                owner = owner or actor_owner
+                if owner is None:
+                    raise StorageConflictError("In-progress task requires an owner")
+                if old_owner not in {None, owner} and not human_override:
+                    raise StorageConflictError("Task is owned by another agent")
+                if self._has_open_blockers(connection, task_list_id, str(task_id)):
+                    raise StorageConflictError("Blocked task cannot be started")
+            if status_value == TaskStatus.COMPLETED.value:
+                owner = owner or old_owner or actor_owner
+                if self._has_open_blockers(connection, task_list_id, str(task_id)):
+                    raise StorageConflictError("Blocked task cannot be completed")
+                if not human_override and old_owner not in {None, actor_owner}:
+                    raise StorageConflictError("Only the task owner can complete it")
+            if status_value == TaskStatus.PENDING.value:
+                if row["status"] == TaskStatus.COMPLETED.value:
+                    downstream = connection.execute(
+                        """
+                        SELECT 1 FROM task_dependencies d
+                        JOIN tasks t ON t.task_list_id = d.task_list_id AND t.id = d.blocked_id
+                        WHERE d.task_list_id = ? AND d.blocker_id = ?
+                          AND t.status IN ('in_progress', 'completed') LIMIT 1
+                        """,
+                        (task_list_id, str(task_id)),
+                    ).fetchone()
+                    if downstream is not None:
+                        raise StorageConflictError("Cannot reopen a task with active or completed downstream work")
+                owner = None
+
+            metadata = _json_loads(row["metadata_json"], {})
+            if "metadata" in changes:
+                incoming = changes["metadata"]
+                if not isinstance(incoming, Mapping):
+                    raise ValueError("metadata must be an object")
+                for key, value in incoming.items():
+                    if value is None:
+                        metadata.pop(str(key), None)
+                    else:
+                        metadata[str(key)] = value
+
+            dependency_changes = {
+                key: [str(value) for value in changes.get(key, [])]
+                for key in (
+                    "add_blocks", "add_blocked_by", "remove_blocks", "remove_blocked_by"
+                )
+            }
+            self._apply_dependency_changes(
+                connection,
+                task_list_id,
+                str(task_id),
+                dependency_changes,
+            )
+            try:
+                connection.execute(
+                    """
+                    UPDATE tasks SET subject = ?, description = ?, active_form = ?,
+                        owner = ?, status = ?, metadata_json = ?, revision = revision + 1,
+                        updated_at = ?
+                    WHERE task_list_id = ? AND id = ?
+                    """,
+                    (
+                        subject,
+                        description,
+                        active_form,
+                        owner,
+                        status_value,
+                        _json_dumps(metadata),
+                        now,
+                        task_list_id,
+                        str(task_id),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StorageConflictError("Owner already has an in-progress task") from exc
+            connection.execute(
+                "UPDATE task_lists SET revision = revision + 1, updated_at = ? WHERE id = ?",
+                (now, task_list_id),
+            )
+            event_type = (
+                "completed"
+                if status_value == TaskStatus.COMPLETED.value
+                and row["status"] != TaskStatus.COMPLETED.value
+                else "updated"
+            )
+            self._insert_task_activity(
+                connection,
+                task_list_id=task_list_id,
+                task_id=str(task_id),
+                event_type=event_type,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                agent_id=agent_id,
+                payload=redact_payload(dict(changes)),
+                created_at=now,
+            )
+        self._notify_activity()
+        return self.get_task_resource(task_list_id, str(task_id))
+
+    def list_task_activity(
+        self,
+        task_list_id: str,
+        *,
+        task_id: str | None = None,
+        after_id: int = 0,
+        limit: int = 500,
+    ) -> list[TaskActivityRecord]:
+        conditions = ["task_list_id = ?", "id > ?"]
+        parameters: list[Any] = [task_list_id, max(0, int(after_id))]
+        if task_id is not None:
+            conditions.append("task_id = ?")
+            parameters.append(str(task_id))
+        parameters.append(_positive_limit(limit))
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT * FROM task_activity WHERE {' AND '.join(conditions)}
+                ORDER BY id LIMIT ?
+                """,
+                parameters,
+            ).fetchall()
+        return [_row_to_task_activity(row) for row in rows]
+
+    def wait_for_task_activity(
+        self,
+        task_list_id: str,
+        after_id: int = 0,
+        timeout: float = 15.0,
+    ) -> list[TaskActivityRecord]:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            activities = self.list_task_activity(task_list_id, after_id=after_id)
+            if activities:
+                return activities
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return []
+            with self._event_condition:
+                self._event_condition.wait(timeout=remaining)
+
+    def _row_to_task_resource(self, row: sqlite3.Row) -> TaskResource:
+        task_list_id = str(row["task_list_id"])
+        task_id = str(row["id"])
+        blocks = self._connection.execute(
+            """
+            SELECT blocked_id FROM task_dependencies
+            WHERE task_list_id = ? AND blocker_id = ?
+            ORDER BY CAST(blocked_id AS INTEGER), blocked_id
+            """,
+            (task_list_id, task_id),
+        ).fetchall()
+        blocked_by = self._connection.execute(
+            """
+            SELECT blocker_id FROM task_dependencies
+            WHERE task_list_id = ? AND blocked_id = ?
+            ORDER BY CAST(blocker_id AS INTEGER), blocker_id
+            """,
+            (task_list_id, task_id),
+        ).fetchall()
+        return TaskResource(
+            task_list_id=task_list_id,
+            task=TaskRecord(
+                id=task_id,
+                subject=str(row["subject"]),
+                description=str(row["description"]),
+                active_form=row["active_form"],
+                owner=row["owner"],
+                status=TaskStatus(str(row["status"])),
+                blocks=tuple(str(item["blocked_id"]) for item in blocks),
+                blocked_by=tuple(str(item["blocker_id"]) for item in blocked_by),
+                metadata=_json_loads(row["metadata_json"], {}),
+            ),
+            revision=int(row["revision"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _has_open_blockers(
+        connection: sqlite3.Connection,
+        task_list_id: str,
+        task_id: str,
+    ) -> bool:
+        return connection.execute(
+            """
+            SELECT 1 FROM task_dependencies d
+            JOIN tasks t ON t.task_list_id = d.task_list_id AND t.id = d.blocker_id
+            WHERE d.task_list_id = ? AND d.blocked_id = ? AND t.status != 'completed'
+            LIMIT 1
+            """,
+            (task_list_id, task_id),
+        ).fetchone() is not None
+
+    def _apply_dependency_changes(
+        self,
+        connection: sqlite3.Connection,
+        task_list_id: str,
+        task_id: str,
+        changes: Mapping[str, Sequence[str]],
+    ) -> None:
+        removals = [
+            *((task_id, item) for item in changes["remove_blocks"]),
+            *((item, task_id) for item in changes["remove_blocked_by"]),
+        ]
+        for blocker_id, blocked_id in removals:
+            connection.execute(
+                """
+                DELETE FROM task_dependencies
+                WHERE task_list_id = ? AND blocker_id = ? AND blocked_id = ?
+                """,
+                (task_list_id, blocker_id, blocked_id),
+            )
+        additions = [
+            *((task_id, item) for item in changes["add_blocks"]),
+            *((item, task_id) for item in changes["add_blocked_by"]),
+        ]
+        for blocker_id, blocked_id in additions:
+            if blocker_id == blocked_id:
+                raise StorageConflictError("Task cannot depend on itself")
+            rows = connection.execute(
+                """
+                SELECT id FROM tasks
+                WHERE task_list_id = ? AND id IN (?, ?)
+                """,
+                (task_list_id, blocker_id, blocked_id),
+            ).fetchall()
+            if len(rows) != 2:
+                raise RecordNotFoundError("Dependency task not found in current task list")
+            blocked_row = connection.execute(
+                "SELECT status FROM tasks WHERE task_list_id = ? AND id = ?",
+                (task_list_id, blocked_id),
+            ).fetchone()
+            if blocked_row["status"] != TaskStatus.PENDING.value:
+                raise StorageConflictError("Dependencies can only be added to pending tasks")
+            existing = connection.execute(
+                """
+                SELECT 1 FROM task_dependencies
+                WHERE task_list_id = ? AND blocker_id = ? AND blocked_id = ?
+                """,
+                (task_list_id, blocker_id, blocked_id),
+            ).fetchone()
+            if existing is not None:
+                continue
+            if self._dependency_path_exists(
+                connection, task_list_id, blocked_id, blocker_id
+            ):
+                raise StorageConflictError("Task dependency would create a cycle")
+            connection.execute(
+                """
+                INSERT INTO task_dependencies(task_list_id, blocker_id, blocked_id)
+                VALUES (?, ?, ?)
+                """,
+                (task_list_id, blocker_id, blocked_id),
+            )
+
+    @staticmethod
+    def _dependency_path_exists(
+        connection: sqlite3.Connection,
+        task_list_id: str,
+        start_id: str,
+        target_id: str,
+    ) -> bool:
+        row = connection.execute(
+            """
+            WITH RECURSIVE reachable(id) AS (
+                SELECT blocked_id FROM task_dependencies
+                WHERE task_list_id = ? AND blocker_id = ?
+                UNION
+                SELECT d.blocked_id FROM task_dependencies d
+                JOIN reachable r ON d.blocker_id = r.id
+                WHERE d.task_list_id = ?
+            )
+            SELECT 1 FROM reachable WHERE id = ? LIMIT 1
+            """,
+            (task_list_id, start_id, task_list_id, target_id),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _insert_task_activity(
+        connection: sqlite3.Connection,
+        *,
+        task_list_id: str,
+        task_id: str,
+        event_type: str,
+        conversation_id: str | None,
+        run_id: str | None,
+        agent_id: str | None,
+        payload: Mapping[str, Any],
+        created_at: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO task_activity(
+                task_list_id, task_id, event_type, conversation_id,
+                run_id, agent_id, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_list_id,
+                task_id,
+                event_type,
+                conversation_id,
+                run_id,
+                agent_id,
+                _json_dumps(dict(payload)),
+                created_at,
+            ),
+        )
+
+    def _notify_activity(self) -> None:
+        with self._event_condition:
+            self._event_condition.notify_all()
 
     # Messages ----------------------------------------------------------
 
@@ -1635,6 +2454,13 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _clean_optional(value: Any) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
 def _validate_choice(name: str, value: str, choices: frozenset[str]) -> None:
     if value not in choices:
         options = ", ".join(sorted(choices))
@@ -1693,6 +2519,35 @@ def _row_to_conversation(row: sqlite3.Row) -> ConversationRecord:
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
         archived_at=row["archived_at"],
+        active_task_list_id=row["active_task_list_id"],
+    )
+
+
+def _row_to_task_list(row: sqlite3.Row) -> TaskListRecord:
+    return TaskListRecord(
+        id=str(row["id"]),
+        workspace=str(row["workspace"]),
+        name=str(row["name"]),
+        scope=TaskListScope(str(row["scope"])),
+        origin_conversation_id=row["origin_conversation_id"],
+        revision=int(row["revision"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+        archived_at=row["archived_at"],
+    )
+
+
+def _row_to_task_activity(row: sqlite3.Row) -> TaskActivityRecord:
+    return TaskActivityRecord(
+        id=int(row["id"]),
+        task_list_id=str(row["task_list_id"]),
+        task_id=str(row["task_id"]),
+        event_type=str(row["event_type"]),
+        conversation_id=row["conversation_id"],
+        run_id=row["run_id"],
+        agent_id=row["agent_id"],
+        payload=_json_loads(row["payload_json"], {}),
+        created_at=str(row["created_at"]),
     )
 
 
@@ -1867,6 +2722,19 @@ def _usage_totals(rows: Sequence[sqlite3.Row]) -> JsonObject:
             "cache_creation_input_tokens",
             "cache_read_input_tokens",
         )
+    )
+    result["prompt_input_tokens"] = sum(
+        int(result[name])
+        for name in (
+            "input_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        )
+    )
+    result["cache_hit_ratio"] = (
+        int(result["cache_read_input_tokens"]) / int(result["prompt_input_tokens"])
+        if result["prompt_input_tokens"]
+        else 0.0
     )
     return result
 

@@ -17,6 +17,7 @@ from codeagent.events import (
 from codeagent.hooks import HookManager, create_default_hooks
 from codeagent.memory import MemoryConfig, MemoryManager, MemoryRecord, MemoryStore
 from codeagent.models import ModelResponse
+from codeagent.planning import PlanningBackend, resolve_planning_backend
 from codeagent.permissions import PermissionDecision, PermissionPolicy
 from codeagent.prompts import (
     PromptAssemblyResult,
@@ -55,6 +56,7 @@ __all__ = [
     "ModelResponse",
     "PermissionDecision",
     "PermissionPolicy",
+    "PlanningBackend",
     "PromptAssemblyResult",
     "PromptConfig",
     "PromptFragment",
@@ -77,5 +79,6 @@ __all__ = [
     "ToolRegistry",
     "create_default_hooks",
     "create_default_registry",
+    "resolve_planning_backend",
     "UsageTracker",
 ]

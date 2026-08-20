@@ -11,6 +11,7 @@ from codeagent.agent import AgentConfig
 from codeagent.anthropic_client import AnthropicModelClient
 from codeagent.context import ContextConfig
 from codeagent.memory import MemoryConfig
+from codeagent.planning import PlanningBackend
 from codeagent.prompts import PromptConfig
 from codeagent.recovery import RecoveryConfig
 
@@ -69,6 +70,7 @@ class EnvironmentConfig:
     memory_config: MemoryConfig = field(default_factory=MemoryConfig)
     prompt_config: PromptConfig = field(default_factory=PromptConfig)
     recovery_config: RecoveryConfig = field(default_factory=RecoveryConfig)
+    planning_mode: PlanningBackend = PlanningBackend.AUTO
 
     @classmethod
     def from_env(cls) -> "EnvironmentConfig":
@@ -164,14 +166,22 @@ class EnvironmentConfig:
                 side_query_max_retries=_int_env("RECOVERY_SIDE_QUERY_MAX_RETRIES", 2),
                 trace=_bool_env("RECOVERY_TRACE", False),
             ),
+            planning_mode=PlanningBackend.parse(
+                os.getenv("CODEAGENT_PLANNING_MODE", "auto")
+            ),
         )
 
-    def to_agent_config(self) -> AgentConfig:
+    def to_agent_config(
+        self,
+        *,
+        planning_backend: PlanningBackend | None = None,
+    ) -> AgentConfig:
         return AgentConfig(
             model=self.model_id,
             system_prompt=self.system_prompt,
             max_tokens=self.max_tokens,
             max_iterations=self.max_iterations,
+            planning_backend=planning_backend or self.planning_mode,
         )
 
     def create_anthropic_client(

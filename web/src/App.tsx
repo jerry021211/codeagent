@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { cx, isRunActive } from "@/lib/utils";
-import type { ApprovalDecision, Conversation, Message } from "@/types/api";
+import type { ApprovalDecision, Conversation, Message, TaskResource } from "@/types/api";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import { ChatWorkspace } from "@/components/ChatWorkspace";
 import { InspectorPanel } from "@/components/InspectorPanel";
@@ -16,6 +16,7 @@ type ThemeMode = "system" | "light" | "dark";
 
 const conversationsKey = ["conversations"] as const;
 const messagesKey = (conversationId: string) => ["conversations", conversationId, "messages"] as const;
+const tasksKey = (taskListId: string) => ["task-lists", taskListId, "tasks"] as const;
 
 export default function App() {
   const queryClient = useQueryClient();
@@ -60,12 +61,28 @@ export default function App() {
     enabled: Boolean(selectedId),
   });
   const selectedConversation = conversationQuery.data ?? conversations.find((item) => item.id === selectedId);
+  const taskListId = selectedConversation?.active_task_list_id ?? undefined;
   const messagesQuery = useQuery({
     queryKey: messagesKey(selectedId ?? ""),
     queryFn: () => api.listMessages(selectedId!),
     enabled: Boolean(selectedId),
   });
   const runtimeQuery = useQuery({ queryKey: ["runtime-config"], queryFn: api.getRuntimeConfig, staleTime: 60_000 });
+  const taskListQuery = useQuery({
+    queryKey: ["task-lists", taskListId],
+    queryFn: () => api.getTaskList(taskListId!),
+    enabled: Boolean(taskListId),
+  });
+  const tasksQuery = useQuery({
+    queryKey: tasksKey(taskListId ?? ""),
+    queryFn: () => api.listTasks(taskListId!),
+    enabled: Boolean(taskListId),
+  });
+  const taskListsQuery = useQuery({
+    queryKey: ["task-lists", "workspace", selectedConversation?.workspace],
+    queryFn: () => api.listTaskLists(selectedConversation!.workspace),
+    enabled: Boolean(selectedConversation?.workspace),
+  });
   const activeRuntime = runtimeQuery.data
     ? { ...runtimeQuery.data, workspace: selectedConversation?.workspace ?? runtimeQuery.data.workspace }
     : runtimeQuery.data;
@@ -84,6 +101,19 @@ export default function App() {
   const pendingApproval = liveRun ? Object.values(liveRun.approvals).find((item) => item.status === "pending") : undefined;
 
   useEffect(() => {
+    if (!taskListId) return;
+    const source = new EventSource(api.taskEventStreamUrl(taskListId), { withCredentials: true });
+    const refresh = () => {
+      void queryClient.invalidateQueries({ queryKey: tasksKey(taskListId) });
+      void queryClient.invalidateQueries({ queryKey: ["task-lists", taskListId] });
+    };
+    source.addEventListener("task.created", refresh);
+    source.addEventListener("task.updated", refresh);
+    source.addEventListener("task.completed", refresh);
+    return () => source.close();
+  }, [queryClient, taskListId]);
+
+  useEffect(() => {
     if (!runId) return;
     void api.getRun(runId).then((run) => {
       ensureRun(run.id, run.status, run.queue_position);
@@ -95,7 +125,8 @@ export default function App() {
     if (!liveRun || isRunActive(liveRun.status)) return;
     void queryClient.invalidateQueries({ queryKey: conversationsKey });
     if (selectedId) void queryClient.invalidateQueries({ queryKey: messagesKey(selectedId) });
-  }, [liveRun?.status, liveRun?.runId, queryClient, selectedId]);
+    if (taskListId) void queryClient.invalidateQueries({ queryKey: tasksKey(taskListId) });
+  }, [liveRun?.status, liveRun?.runId, queryClient, selectedId, taskListId]);
 
   const createConversation = useMutation({
     mutationFn: (workspace: string) => api.createConversation({ workspace }),
@@ -152,6 +183,49 @@ export default function App() {
     },
   });
 
+  const createTask = useMutation({
+    mutationFn: (input: { subject: string; description: string; activeForm?: string }) => {
+      if (!taskListId) throw new Error("当前会话没有任务列表");
+      return api.createTask(taskListId, input);
+    },
+    onSuccess: (resource) => {
+      queryClient.setQueryData<TaskResource[]>(tasksKey(resource.taskListId), (current = []) => [...current, resource]);
+    },
+    onError: (error) => showError(error, setNotice),
+  });
+
+  const promoteTaskList = useMutation({
+    mutationFn: () => {
+      if (!taskListId) throw new Error("当前会话没有任务列表");
+      return api.promoteTaskList(taskListId);
+    },
+    onSuccess: (taskList) => {
+      queryClient.setQueryData(["task-lists", taskList.id], taskList);
+      void queryClient.invalidateQueries({ queryKey: ["task-lists", "workspace", taskList.workspace] });
+    },
+    onError: (error) => showError(error, setNotice),
+  });
+
+  const bindTaskList = useMutation({
+    mutationFn: (nextTaskListId: string) => {
+      if (!selectedId) throw new Error("请先选择会话");
+      return api.bindTaskList(selectedId, nextTaskListId);
+    },
+    onSuccess: (conversation) => {
+      queryClient.setQueryData(["conversations", conversation.id], conversation);
+      queryClient.setQueryData<Conversation[]>(conversationsKey, (current = []) => current.map((item) => item.id === conversation.id ? conversation : item));
+    },
+    onError: (error) => showError(error, setNotice),
+  });
+
+  const continueTask = (task: TaskResource) => {
+    if (!selectedId || liveRun && isRunActive(liveRun.status)) return;
+    sendRun.mutate({
+      conversationId: selectedId,
+      content: `继续处理 Task #${task.task.id}：${task.task.subject}。先读取 TaskGet，按 description 的完成条件执行，并及时用 TaskUpdate 更新状态。`,
+    });
+  };
+
   const send = () => {
     const content = draft.trim();
     if (!selectedId || !content || liveRun && isRunActive(liveRun.status)) return;
@@ -179,13 +253,13 @@ export default function App() {
           {pendingApproval && runId && <div className="pointer-events-none absolute inset-x-0 bottom-[112px] z-20 sm:bottom-[124px]"><div className="pointer-events-auto"><ApprovalBanner approval={pendingApproval} busy={decideApproval.isPending} onDecision={(decision) => decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} /></div></div>}
         </div>
 
-        <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} /></div>
+        <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || bindTaskList.isPending || promoteTaskList.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} taskLists={taskListsQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} onSelectTaskList={(id) => bindTaskList.mutate(id)} onPromoteTaskList={() => promoteTaskList.mutate()} /></div>
       </div>
 
       <Drawer open={leftOpen} side="left" onClose={() => setLeftOpen(false)}>
         <ConversationSidebar mobile conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} onSearch={setSearch} onSelect={(id) => { setSelectedId(id); setLeftOpen(false); }} onCreate={() => { setLeftOpen(false); setWorkspacePickerOpen(true); }} onArchive={(conversation) => archiveConversation.mutate(conversation)} onClose={() => setLeftOpen(false)} />
       </Drawer>
-      <Drawer open={rightOpen} side="right" onClose={() => setRightOpen(false)} width="min(90vw, 360px)"><InspectorPanel mobile run={liveRun} runtime={activeRuntime} onClose={() => setRightOpen(false)} /></Drawer>
+      <Drawer open={rightOpen} side="right" onClose={() => setRightOpen(false)} width="min(90vw, 360px)"><InspectorPanel mobile run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || bindTaskList.isPending || promoteTaskList.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} taskLists={taskListsQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} onSelectTaskList={(id) => bindTaskList.mutate(id)} onPromoteTaskList={() => promoteTaskList.mutate()} onClose={() => setRightOpen(false)} /></Drawer>
 
       <WorkspacePicker
         open={workspacePickerOpen}

@@ -14,20 +14,21 @@ from typing import Any
 from uuid import uuid4
 
 from codeagent.anthropic_client import AnthropicModelClient
-from codeagent.context import ContextManager
+from codeagent.context import ContextManager, HistoryObserver
 from codeagent.events import EventEmitter, TokenTotals, UsageTracker
 from codeagent.hooks import HookManager
 from codeagent.memory import MemoryManager
 from codeagent.messages import Message, ToolUse, extract_text, normalize_tool_uses
 from codeagent.prompts import PromptAssemblyResult, PromptMode, PromptRuntime
+from codeagent.planning import PlanningBackend
 from codeagent.recovery import RecoveryRuntime
 from codeagent.runtime import CancellationToken
 from codeagent.tracing import trace_run
 from codeagent.tools import (
     COMPACT_TOOL_NAME,
-    TASK_TOOL_NAME,
+    SUBAGENT_TOOL_NAME,
     CompactTool,
-    TaskTool,
+    SubagentTool,
     ToolRegistry,
 )
 
@@ -44,6 +45,7 @@ class AgentConfig:
     system_prompt: str
     max_tokens: int = 8000
     max_iterations: int = 50
+    planning_backend: PlanningBackend = PlanningBackend.TODO
 
 
 @dataclass(slots=True)
@@ -85,9 +87,13 @@ class Agent:
     subagent_log: Callable[[str], None] | None = None
     skill_catalog: str = ""
     memory_catalog: str = ""
+    history_observer: HistoryObserver = field(default_factory=HistoryObserver)
     _compact_requested: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
+        task_tools = {"TaskCreate", "TaskGet", "TaskList", "TaskUpdate"}
+        if "todo_write" in self.tools and any(name in self.tools for name in task_tools):
+            raise ValueError("TodoWrite and Task tools cannot be registered together")
         client_emitter = getattr(self.client, "event_emitter", None)
         if self.event_emitter is None:
             self.event_emitter = client_emitter or EventEmitter()
@@ -103,8 +109,8 @@ class Agent:
             self.prompt_runtime = PromptRuntime(workspace=Path.cwd())
         if self.recovery_runtime is None:
             self.recovery_runtime = RecoveryRuntime()
-        if self.allow_subagents and TASK_TOOL_NAME not in self.tools:
-            self.tools.register(TaskTool(spawn_fn=self._spawn_subagent))
+        if self.allow_subagents and SUBAGENT_TOOL_NAME not in self.tools:
+            self.tools.register(SubagentTool(spawn_fn=self._spawn_subagent))
         if COMPACT_TOOL_NAME not in self.tools:
             self.tools.register(CompactTool(compact_fn=self._request_manual_compact))
 
@@ -149,6 +155,25 @@ class Agent:
                 model=self.config.model,
                 max_tokens=self.config.max_tokens,
             )#现在已经有了一个state了，后续多处会对此进行修改
+            if prompt is not None:
+                selected_memory_context = self._selected_memory_context(
+                    model=recovery_state.current_model,
+                    max_tokens=recovery_state.current_max_tokens,
+                )
+                if selected_memory_context:
+                    assert self.prompt_runtime is not None
+                    self.messages[-1] = {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": self.prompt_runtime.memory_turn_context(
+                                    selected_memory_context
+                                ),
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
 
             while iterations < self.config.max_iterations:
                 self._check_cancelled()
@@ -165,22 +190,26 @@ class Agent:
                     self.add_user_message(str(reminder)) #如果有加入提醒该做todolist了
 
                 tool_schemas = self.tools.schemas()
-                selected_memory_context = self._selected_memory_context(
-                    model=recovery_state.current_model,
-                    max_tokens=recovery_state.current_max_tokens,
-                )
                 prompt_assembly = self._assemble_prompt(
                     tool_schemas,
-                    selected_memory_context=selected_memory_context,
                     model=recovery_state.current_model,
                 ) #组装system prompt
                 self._log_prompt_assembly(prompt_assembly) #system prompt加入log
+                history_observation = self.history_observer.observe(self.messages)
+                history_payload = history_observation.to_event_payload()
+                if history_observation.rewritten:
+                    self.event_emitter.emit(
+                        "history.rewritten",
+                        history_payload,
+                        iteration=iterations,
+                    )
                 self.event_emitter.emit(
                     "prompt.assembled",
                     {
                         "prompt_hash": prompt_assembly.prompt_hash,
                         "chars": len(prompt_assembly.system_prompt),
-                        "cache_hit": prompt_assembly.cache_hit,
+                        "assembly_reused": prompt_assembly.cache_hit,
+                        **history_payload,
                         "fragments": [
                             {
                                 "id": item.id,
@@ -195,7 +224,6 @@ class Agent:
                     iteration=iterations,
                 )
                 compact_for_retry = lambda messages: self._compact_for_recovery_retry(
-                    prompt_assembly,
                     model=recovery_state.current_model,
                     max_tokens=recovery_state.current_max_tokens,
                 )
@@ -208,14 +236,14 @@ class Agent:
                         max_tokens=max_tokens,
                     ),
                     state=recovery_state,
-                    messages=prompt_assembly.apply_reminders(self.messages),
+                    messages=self.messages,
                     compact_fn=compact_for_retry,
                     event_emitter=self.event_emitter,
                     cancellation=self.cancellation,
                 )
                 self._check_cancelled()
                 if call_result.messages is not None:
-                    self.messages = self._strip_prompt_reminders(call_result.messages)
+                    self.messages = call_result.messages
                 if call_result.failed or call_result.response is None:
                     self._after_turn_memory()
                     result = self._make_result(
@@ -407,7 +435,7 @@ class Agent:
     def _spawn_subagent(self, description: str) -> str:
         task_description = str(description or "").strip()
         if not task_description:
-            return "Error: task description is required."
+            return "Error: subagent description is required."
 
         subagent_id = f"agent_{uuid4().hex}"
         child_emitter = self.event_emitter.child(agent_id=subagent_id)
@@ -504,10 +532,10 @@ class Agent:
     def _subagent_tools(self) -> ToolRegistry:
         if self.subagent_registry_factory is not None:
             registry = self.subagent_registry_factory()
-            if TASK_TOOL_NAME in registry:
-                return registry.copy_without({TASK_TOOL_NAME})
+            if SUBAGENT_TOOL_NAME in registry:
+                return registry.copy_without({SUBAGENT_TOOL_NAME})
             return registry
-        return self.tools.copy_without({TASK_TOOL_NAME})
+        return self.tools.copy_without({SUBAGENT_TOOL_NAME})
 
     def _subagent_environment(self) -> tuple[ToolRegistry, HookManager, ContextManager]:
         if self.subagent_environment_factory is not None:
@@ -518,8 +546,8 @@ class Agent:
                 if len(environment) > 2
                 else ContextManager(config=self.context.config)
             )
-            if TASK_TOOL_NAME in registry:
-                registry = registry.copy_without({TASK_TOOL_NAME})
+            if SUBAGENT_TOOL_NAME in registry:
+                registry = registry.copy_without({SUBAGENT_TOOL_NAME})
             return registry, hooks, context
         return self._subagent_tools(), self.hooks, ContextManager(config=self.context.config)
 
@@ -567,7 +595,7 @@ class Agent:
         if self.prompt_log is None:
             return
         fragments = ", ".join(item.id for item in assembly.trace)
-        cache = " cache_hit" if assembly.cache_hit else ""
+        cache = " assembly_reused" if assembly.cache_hit else ""
         self.prompt_log(
             f"[prompt] hash={assembly.prompt_hash} chars={len(assembly.system_prompt)} "
             f"fragments={len(assembly.trace)}{cache}: {fragments}"
@@ -575,7 +603,6 @@ class Agent:
 
     def _compact_for_recovery_retry(
         self,
-        prompt_assembly: PromptAssemblyResult,
         *,
         model: str,
         max_tokens: int,
@@ -589,7 +616,7 @@ class Agent:
         )
         if compacted is None:
             return None
-        return prompt_assembly.apply_reminders(compacted)
+        return compacted
 
     def _selected_memory_context(
         self,
@@ -695,21 +722,6 @@ class Agent:
 
         if self.cancellation is not None:
             self.cancellation.raise_if_cancelled()
-
-    @staticmethod
-    def _strip_prompt_reminders(messages: list[Message]) -> list[Message]:
-        if not messages:
-            return messages
-        return [
-            message
-            for message in messages
-            if not (
-                message.get("role") == "user"
-                and isinstance(message.get("content"), str)
-                and str(message.get("content", "")).startswith("<system-reminder>")
-            )
-        ]
-
 
 def _is_prompt_too_long(exc: Exception) -> bool:
     text = f"{type(exc).__name__}: {exc}".casefold()

@@ -8,6 +8,7 @@ from typing import Any, Callable
 from codeagent.hooks.manager import HookManager
 from codeagent.messages import ToolUse
 from codeagent.permissions import PermissionPolicy
+from codeagent.planning import PlanningBackend
 from codeagent.tools import (
     TodoStore,
     create_todo_final_status_hook,
@@ -25,20 +26,24 @@ def create_default_hooks(
     large_output_limit: int = 100_000,
     todo_store: TodoStore | None = None,
     todo_reminder_interval: int = 3,
+    planning_backend: PlanningBackend | str = PlanningBackend.TODO,
 ) -> HookManager:
     hooks = HookManager()
     policy = permission_policy or PermissionPolicy(workspace=workspace or Path.cwd())
-    store = todo_store or TodoStore()
+    backend = PlanningBackend.parse(planning_backend)
 
     hooks.register("UserPromptSubmit", _user_prompt_log(workspace or Path.cwd(), log))
-    hooks.register(
-        "BeforeModelCall",
-        create_todo_reminder_hook(store, interval=todo_reminder_interval),
-    )
+    if backend is PlanningBackend.TODO:
+        store = todo_store or TodoStore()
+        hooks.register(
+            "BeforeModelCall",
+            create_todo_reminder_hook(store, interval=todo_reminder_interval),
+        )
     hooks.register("PreToolUse", _permission_hook(policy))
     hooks.register("PreToolUse", _tool_log(log))
     hooks.register("PostToolUse", _large_output_hook(large_output_limit, log))
-    hooks.register("Stop", create_todo_final_status_hook(store, log))
+    if backend is PlanningBackend.TODO:
+        hooks.register("Stop", create_todo_final_status_hook(store, log))
     hooks.register("Stop", _summary_hook(log))
     return hooks
 

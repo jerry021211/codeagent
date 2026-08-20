@@ -1,4 +1,4 @@
-"""Subagent task tool."""
+"""Tool adapter for delegating work to a subagent."""
 
 from __future__ import annotations
 
@@ -7,17 +7,17 @@ from dataclasses import dataclass, field
 
 from codeagent.tools.base import ToolDefinition
 
-TASK_TOOL_NAME = "task"
+SUBAGENT_TOOL_NAME = "subagent"
 
 
 @dataclass(slots=True)
-class TaskTool:
-    """Delegate a focused task to a caller-provided subagent runner."""
+class SubagentTool:
+    """Delegate focused work to a caller-provided subagent runner."""
 
     spawn_fn: Callable[[str], str]
     definition: ToolDefinition = field(
         default=ToolDefinition(
-            name=TASK_TOOL_NAME,
+            name=SUBAGENT_TOOL_NAME,
             description=(
                 "Launch a subagent to handle a focused subtask with a fresh "
                 "message list. Returns only the subagent's final conclusion."

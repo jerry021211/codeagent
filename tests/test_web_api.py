@@ -190,6 +190,46 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(cancelled.status_code, 200)
         self.assertEqual(cancelled.json()["status"], "cancelled")
 
+    def test_task_list_and_task_crud(self) -> None:
+        created = self.client.post(
+            "/api/conversations",
+            json={"title": "Task API", "workspace": str(self.workspace)},
+        )
+        conversation = created.json()
+        task_list_id = conversation["active_task_list_id"]
+        self.assertTrue(task_list_id)
+
+        task = self.client.post(
+            f"/api/task-lists/{task_list_id}/tasks",
+            json={"subject": "Build API", "description": "Implement and test it"},
+        )
+        self.assertEqual(task.status_code, 201)
+        self.assertEqual(task.json()["task"]["id"], "1")
+        self.assertEqual(
+            set(task.json()["task"]),
+            {"id", "subject", "description", "activeForm", "owner", "status", "blocks", "blockedBy", "metadata"},
+        )
+
+        updated = self.client.patch(
+            f"/api/task-lists/{task_list_id}/tasks/1",
+            json={"expectedRevision": 1, "status": "in_progress", "owner": "human"},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["task"]["owner"], "human")
+
+        stale = self.client.patch(
+            f"/api/task-lists/{task_list_id}/tasks/1",
+            json={"expectedRevision": 1, "subject": "Stale write"},
+        )
+        self.assertEqual(stale.status_code, 409)
+
+        listing = self.client.get(f"/api/task-lists/{task_list_id}/tasks")
+        self.assertEqual(len(listing.json()), 1)
+        activity = self.client.get(
+            f"/api/task-lists/{task_list_id}/tasks/1/activity"
+        )
+        self.assertEqual([item["eventType"] for item in activity.json()], ["created", "updated"])
+
     def test_sse_replays_after_latest_cursor_and_closes_on_terminal(self) -> None:
         conversation = self.repository.create_conversation(title="SSE test")
         run = self.repository.create_run(conversation.id)

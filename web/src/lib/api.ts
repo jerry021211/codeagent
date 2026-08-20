@@ -6,6 +6,8 @@ import type {
   Message,
   Run,
   RuntimeConfig,
+  TaskList,
+  TaskResource,
   WorkspaceListing,
 } from "@/types/api";
 import { unwrapList } from "@/lib/utils";
@@ -80,6 +82,49 @@ export const api = {
     );
   },
 
+  async listTaskLists(workspace: string) {
+    return unwrapList(
+      await request<ApiList<TaskList>>(`/task-lists?workspace=${encodeURIComponent(workspace)}`),
+    );
+  },
+
+  getTaskList(taskListId: string) {
+    return request<TaskList>(`/task-lists/${encodeURIComponent(taskListId)}`);
+  },
+
+  async listTasks(taskListId: string) {
+    return unwrapList(
+      await request<ApiList<TaskResource>>(`/task-lists/${encodeURIComponent(taskListId)}/tasks`),
+    );
+  },
+
+  createTask(taskListId: string, task: { subject: string; description: string; activeForm?: string }) {
+    return request<TaskResource>(`/task-lists/${encodeURIComponent(taskListId)}/tasks`, {
+      method: "POST",
+      body: JSON.stringify(task),
+    });
+  },
+
+  updateTask(taskListId: string, taskId: string, patch: Record<string, unknown> & { expectedRevision: number }) {
+    return request<TaskResource>(`/task-lists/${encodeURIComponent(taskListId)}/tasks/${encodeURIComponent(taskId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  },
+
+  promoteTaskList(taskListId: string) {
+    return request<TaskList>(`/task-lists/${encodeURIComponent(taskListId)}/promote`, {
+      method: "POST",
+    });
+  },
+
+  bindTaskList(conversationId: string, taskListId: string) {
+    return request<Conversation>(`/conversations/${encodeURIComponent(conversationId)}/task-list`, {
+      method: "POST",
+      body: JSON.stringify({ taskListId }),
+    });
+  },
+
   createRun(conversationId: string, content: string) {
     return request<CreateRunResponse>(`/conversations/${encodeURIComponent(conversationId)}/runs`, {
       method: "POST",
@@ -109,5 +154,9 @@ export const api = {
   eventStreamUrl(runId: string, after?: number) {
     const query = after != null && after > 0 ? `?after=${after}` : "";
     return `${API_ROOT}/runs/${encodeURIComponent(runId)}/events${query}`;
+  },
+
+  taskEventStreamUrl(taskListId: string) {
+    return `${API_ROOT}/task-lists/${encodeURIComponent(taskListId)}/events`;
   },
 };

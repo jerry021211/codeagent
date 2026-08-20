@@ -36,12 +36,35 @@ class RecordingEventSink:
     def __init__(self, repository: Any) -> None:
         self.repository = repository
         self._model_calls: set[str] = set()
+        self._prompt_metadata: dict[tuple[str, str], dict[str, Any]] = {}
         self._lock = Lock()
 
     def emit(self, event: RunEvent) -> None:
         persisted = self.repository.append_event(event)
+        if persisted.type == "prompt.assembled":
+            self._remember_prompt_metadata(persisted)
         if persisted.type in {"model.started", "model.completed", "model.failed"}:
             self._record_model_event(persisted)
+
+    def _remember_prompt_metadata(self, event: RunEvent) -> None:
+        observed_fields = {
+            "iteration": event.iteration,
+            "prompt_hash": event.payload.get("prompt_hash"),
+            "history_generation": event.payload.get("history_generation"),
+            "history_rewritten": event.payload.get("history_rewritten"),
+            "rewrite_reason": event.payload.get("rewrite_reason"),
+            "previous_message_count": event.payload.get("previous_message_count"),
+            "current_message_count": event.payload.get("current_message_count"),
+            "common_prefix_messages": event.payload.get("common_prefix_messages"),
+            "discarded_prefix_messages": event.payload.get(
+                "discarded_prefix_messages"
+            ),
+            "appended_messages": event.payload.get("appended_messages"),
+            "previous_history_hash": event.payload.get("previous_history_hash"),
+            "current_history_hash": event.payload.get("current_history_hash"),
+        }
+        with self._lock:
+            self._prompt_metadata[(event.run_id, event.agent_id)] = observed_fields
 
     def _record_model_event(self, event: RunEvent) -> None:
         payload = event.payload
@@ -53,24 +76,28 @@ class RecordingEventSink:
                 if event.type == "model.started":
                     if call_id in self._model_calls:
                         return
+                    call_kind = str(payload.get("call_kind") or "main")
                     self.repository.create_model_call(
                         event.run_id,
                         model=str(payload.get("model") or ""),
-                        call_kind=str(payload.get("call_kind") or "main"),
+                        call_kind=call_kind,
                         agent_id=event.agent_id,
                         parent_agent_id=event.parent_agent_id,
+                        metadata=self._model_call_metadata(event, call_kind),
                         model_call_id=call_id,
                         started_at=event.occurred_at,
                     )
                     self._model_calls.add(call_id)
                     return
                 if call_id not in self._model_calls:
+                    call_kind = str(payload.get("call_kind") or "main")
                     self.repository.create_model_call(
                         event.run_id,
                         model=str(payload.get("model") or ""),
-                        call_kind=str(payload.get("call_kind") or "main"),
+                        call_kind=call_kind,
                         agent_id=event.agent_id,
                         parent_agent_id=event.parent_agent_id,
+                        metadata=self._model_call_metadata(event, call_kind),
                         model_call_id=call_id,
                         started_at=event.occurred_at,
                     )
@@ -87,6 +114,11 @@ class RecordingEventSink:
             # Model-call analytics are derived; the replayable event remains the
             # source of truth and must not make execution fail.
             return
+
+    def _model_call_metadata(self, event: RunEvent, call_kind: str) -> dict[str, Any]:
+        if call_kind != "main":
+            return {}
+        return dict(self._prompt_metadata.get((event.run_id, event.agent_id), {}))
 
 
 class CompositeEventSink:

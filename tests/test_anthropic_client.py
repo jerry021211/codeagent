@@ -153,6 +153,8 @@ class AnthropicClientTests(unittest.TestCase):
         self.assertIsNotNone(response.usage)
         assert response.usage is not None
         self.assertEqual(response.usage.total_tokens, 26)
+        self.assertEqual(response.usage.prompt_input_tokens, 19)
+        self.assertAlmostEqual(response.usage.cache_hit_ratio, 5 / 19)
         self.assertEqual(response.usage.call_kind, "memory_select")
         self.assertEqual(tracker.snapshot().total_tokens, 26)
         self.assertEqual(

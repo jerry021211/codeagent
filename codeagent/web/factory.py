@@ -13,6 +13,7 @@ from codeagent import (
     MemoryManager,
     MemoryStore,
     PromptRuntime,
+    PlanningBackend,
     RecoveryRuntime,
     SkillLoader,
     TodoStore,
@@ -29,10 +30,11 @@ from codeagent.tools import WorkspaceGuard
 class WebAgentFactory:
     """Build fresh, non-shared mutable runtime objects for one workspace."""
 
-    def __init__(self, env: EnvironmentConfig, workspace: str | Path) -> None:
+    def __init__(self, env: EnvironmentConfig, workspace: str | Path, task_service: Any) -> None:
         self.env = env
         self.workspace = Path(workspace).resolve()
         self.workspace_guard = WorkspaceGuard(self.workspace)
+        self.task_service = task_service
 
     def create(
         self,
@@ -42,13 +44,10 @@ class WebAgentFactory:
         permission_broker: WaitingPermissionBroker,
         checkpoint: Any | None = None,
     ) -> Agent:
-        todo_store = TodoStore()
         state = RuntimeState()
         messages: list[dict[str, Any]] = []
         if checkpoint is not None:
             messages = [dict(item) for item in checkpoint.messages]
-            todo_store.todos = [dict(item) for item in checkpoint.todos]
-            todo_store.revision = int(checkpoint.metadata.get("todo_revision", 0))
             state = _restore_runtime_state(checkpoint.context)
 
         changed_files = set(state.files_changed)
@@ -64,7 +63,7 @@ class WebAgentFactory:
         context = ContextManager(
             config=context_config,
             state=state,
-            todo_store=todo_store,
+            todo_store=None,
         )
         skill_loader = self._skill_loader()
         memory_store = self._memory_store()
@@ -80,28 +79,25 @@ class WebAgentFactory:
         )
         usage_tracker = UsageTracker()
 
-        def todo_changed(_rendered: str) -> None:
-            event_emitter.emit(
-                "todo.updated",
-                {
-                    "revision": todo_store.revision,
-                    "todos": [
-                        {"id": f"todo-{index}", **dict(todo)}
-                        for index, todo in enumerate(todo_store.todos)
-                    ],
-                },
-            )
+        execution = event_emitter.context
+        task_list = self.task_service.ensure_conversation_task_list(
+            execution.conversation_id
+        )
 
         def tools_for():
             return create_default_registry(
-                todo_store=todo_store,
-                todo_log=todo_changed,
                 skill_loader=skill_loader,
                 memory_store=memory_store,
                 allow_memory_write=True,
                 memory_max_items=self.env.memory_config.max_loaded_items,
                 workspace_guard=self.workspace_guard,
                 changed_files=changed_files,
+                planning_backend=PlanningBackend.TASKS,
+                task_service=self.task_service,
+                task_list_id=task_list.id,
+                conversation_id=execution.conversation_id,
+                run_id=execution.run_id,
+                agent_id=execution.agent_id,
             )
 
         policy = PermissionPolicy(
@@ -112,8 +108,8 @@ class WebAgentFactory:
         hooks = create_default_hooks(
             permission_policy=policy,
             workspace=self.workspace,
-            todo_store=todo_store,
             log=lambda _message: None,
+            planning_backend=PlanningBackend.TASKS,
         )
         client = self.env.create_anthropic_client(
             stream=self.env.stream,
@@ -132,12 +128,14 @@ class WebAgentFactory:
                     memory_max_items=self.env.memory_config.max_loaded_items,
                     workspace_guard=self.workspace_guard,
                     changed_files=changed_files,
+                    planning_backend=PlanningBackend.TODO,
                 ),
                 create_default_hooks(
                     permission_policy=policy,
                     workspace=self.workspace,
                     todo_store=sub_todos,
                     log=lambda _message: None,
+                    planning_backend=PlanningBackend.TODO,
                 ),
                 ContextManager(config=context_config, todo_store=sub_todos),
             )
@@ -145,7 +143,7 @@ class WebAgentFactory:
         return Agent(
             client=client,
             tools=tools_for(),
-            config=self.env.to_agent_config(),
+            config=self.env.to_agent_config(planning_backend=PlanningBackend.TASKS),
             hooks=hooks,
             context=context,
             memory_manager=memory_manager,
@@ -166,7 +164,7 @@ class WebAgentFactory:
     def for_workspace(self, workspace: str | Path) -> "WebAgentFactory":
         """Return an isolated factory while reusing immutable environment config."""
 
-        return type(self)(self.env, workspace)
+        return type(self)(self.env, workspace, self.task_service)
 
     def _skill_loader(self) -> SkillLoader | None:
         if not self.env.enable_skills:

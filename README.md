@@ -5,7 +5,7 @@
 设计参考 `shareAI-lab/learn-claude-code` 的核心思想：
 
 - agent loop 保持简单稳定：模型响应、执行工具、追加 `tool_result`、继续循环。
-- 工具、权限、hooks、memory、task、skills、MCP 等能力放在 loop 外侧扩展。
+- 工具、权限、hooks、memory、subagent、skills、MCP 等能力放在 loop 外侧扩展。
 - `Agent` 直接使用 Anthropic SDK client，保持 Anthropic 的 messages/tools 格式。
 
 ## 当前结构
@@ -24,7 +24,7 @@ codeagent/
   prompts/          # system prompt 动态组装
   skills/           # skill catalog 与按需加载
   memory/           # Markdown 长期记忆与模型选择
-  tasks/            # 任务系统占位
+  tasks/            # 持久化 Task 领域模型
   runtime/          # 后台任务/运行时占位
   teams/            # 多 agent 通讯占位
   worktrees/        # worktree 隔离占位
@@ -40,7 +40,7 @@ codeagent/
 ## Web 工作台
 
 项目现在包含一个本机单用户 Coding Cockpit：左侧管理会话，中间显示对话、
-流式回复和 Agent 动作，右侧展示 Token、TODO、子 Agent、恢复记录、文件改动与
+流式回复和 Agent 动作，右侧展示 Token、持久化任务、子 Agent、恢复记录、文件改动与
 脱敏后的调试事件。消息、Run、审批、模型调用用量、事件流和 checkpoint 持久化在
 启动目录的 `.codeagent/state.db`。新建对话时可以从页面选择任意已有的本机项目
 目录；每个对话永久绑定自己的工作区，后续执行使用该目录专属的 Agent 和工具状态。
@@ -74,7 +74,8 @@ Web 运行时有以下边界：
 - SSE 事件带持久化序号，断线后可以继续回放；未完成 Run 在进程重启后标记为
   `interrupted`，不会盲目重放可能产生副作用的操作。
 - Token 使用量来自 provider 返回的真实 usage，并按主模型、memory、context、
-  子 Agent 等 `call_kind` 汇总；provider 不返回 usage 时明确标记为不可用。
+  子 Agent 等 `call_kind` 汇总；界面同时展示缓存读取量和缓存命中率，provider
+  不返回 usage 时明确标记为不可用。
 - 调试面板不会展示完整 system prompt 或隐藏推理内容，事件 payload 会截断和脱敏。
 
 ## 环境配置
@@ -88,6 +89,7 @@ BASE_URL=
 MAX_TOKENS=8000
 MAX_ITERATIONS=50
 STREAMING=false
+CODEAGENT_PLANNING_MODE=auto
 SYSTEM_PROMPT=You are a coding agent. Use tools to solve tasks.
 ```
 
@@ -120,6 +122,10 @@ CLI 默认启用基础 hooks：
 - `Stop`：工具调用次数统计
 
 ## 规划能力：todo_write
+
+规划后端由 `CODEAGENT_PLANNING_MODE=auto|tasks|todo` 控制。`auto` 下 Web 和
+交互式 CLI 使用持久化 Task System，单次 CLI、SDK 默认注册表和普通子 Agent
+继续使用 TodoWrite；同一个 Agent 不会同时获得两套规划工具。
 
 默认工具池包含 `todo_write`。它只维护当前进程内的一份 TODO
 计划，不读文件、不运行命令、不写工作区。它的作用是让模型在多步骤任务前
@@ -160,23 +166,36 @@ CLI 会在 `todo_write` 更新计划时打印用户可见的任务表：
 `TodoStore`，并把同一个 store 同时传给 `create_default_registry()` 和
 `create_default_hooks()`。这样每个 Agent 的 TODO 计划互不污染。
 
-## 子 Agent：task
+## Task System：当前会话直接执行
 
-`task` 是一个普通工具，由 `TaskTool(spawn_fn=...)` 实现。工具层只保存 schema
+交互式会话注册 `TaskCreate`、`TaskGet`、`TaskList`、`TaskUpdate`。Task 持久化在
+工作区 `.codeagent/state.db`，支持 TaskList、依赖、owner、原子认领和 Activity。
+任务业务对象保持九字段：`id`、`subject`、`description`、`activeForm`、`owner`、
+`status`、`blocks`、`blockedBy`、`metadata`；TaskList、revision 和时间戳位于
+独立持久化外壳中。
+
+Task 默认在当前 Conversation 中直接执行。开始 Ready 任务时用 `TaskUpdate` 设置
+`in_progress`，完成代码和验证后设置 `completed`，不会为每个任务创建独立对话。
+Web 右侧“任务”页可查看 Ready、Blocked、进行中和已完成任务，也可以创建任务，
+或把指定任务作为普通 Run 继续交给当前会话。
+
+## 子 Agent：subagent
+
+`subagent` 是一个委派工具，由 `SubagentTool(spawn_fn=...)` 实现。工具层只保存 schema
 和被注入的 `spawn_fn`，不 import `Agent`，因此不会形成循环依赖。`Agent` 默认
-会给自身注入 `TaskTool(spawn_fn=self._spawn_subagent)`。模型调用 `task` 时，父
+会给自身注入 `SubagentTool(spawn_fn=self._spawn_subagent)`。模型调用 `subagent` 时，父
 Agent 会创建一个新的子 Agent：
 
 - 子 Agent 使用全新的 `messages` 列表，只包含父 Agent 传入的子任务描述。
 - 子 Agent 跑自己的 agent loop，可继续调用读文件、搜索、bash、写入、编辑、
   `todo_write` 等工具。
-- 子 Agent 的工具表会移除 `task`，避免递归生成子 Agent。
+- 子 Agent 的工具表会移除 `subagent`，避免递归生成子 Agent。
 - 父 Agent 的上下文只收到子 Agent 的最终文本结论，不接收其中间消息和工具历史。
 
 CLI 默认会给子 Agent 创建独立的 `TodoStore`、默认工具池和默认 hooks；权限检查
 仍通过 hooks 执行，因此子 Agent 不会绕过权限策略。代码中如需自定义子 Agent
 环境，可在构造 `Agent` 时传入 `subagent_environment_factory`。如需手动组装工具
-池，也可以调用 `create_default_registry(task_spawn_fn=...)` 显式加入 `TaskTool`。
+池，也可以调用 `create_default_registry(subagent_spawn_fn=...)` 显式加入 `SubagentTool`。
 
 CLI 会在进入和退出子 Agent 时输出显式标志：
 
@@ -188,8 +207,21 @@ CLI 会在进入和退出子 Agent 时输出显式标志：
 可以用下面的命令测试一次子 Agent 调用：
 
 ```bash
-python -m codeagent --no-stream "请必须调用 task 工具，让子 Agent 读取 README.md 并总结这个项目的用途；拿到子 Agent 结果后，再用一句话告诉我结论。"
+python -m codeagent --no-stream "请必须调用 subagent 工具，让子 Agent 读取 README.md 并总结这个项目的用途；拿到子 Agent 结果后，再用一句话告诉我结论。"
 ```
+
+## 运行平台与命令 Shell
+
+进程首次创建 Agent 或命令工具时会检测宿主操作系统，并缓存检测结果：
+
+- Windows 优先使用 PowerShell（`pwsh` 或 Windows PowerShell），不可用时回退到
+  `cmd.exe`。
+- Linux 和 macOS 优先使用 Bash，不可用时回退到 POSIX `sh`。
+- 命令工具会显式调用检测到的 shell，不再依赖 `subprocess` 的隐式平台默认值。
+- 当前操作系统、实际 shell 和对应命令风格会作为运行时提醒发送给模型，避免在
+  Windows 生成 POSIX-only 命令，或在 Linux/macOS 生成 PowerShell、cmd 命令。
+
+为了兼容现有工具协议，工具名仍为 `bash`，但其描述会标明当前实际使用的 shell。
 
 ## 运行时 System Prompt 组装
 
@@ -200,14 +232,20 @@ Agent 不再在 `agent.py` 里硬编码 todo、subagent、skill、memory 等 pro
 Agent 收集真实运行状态
 -> PromptProvider 产出 PromptFragment
 -> PromptAssembler 按 section、priority、budget 组装
--> 返回 system prompt + system-reminder 消息 + trace/hash
+-> 返回 system prompt + trace/hash
 ```
 
-Prompt 分三类：
+System prompt 的顺序是：
 
-- `static`：稳定身份和执行规则，尽量保持不变，方便未来接 API prompt cache。
-- `dynamic`：根据真实状态注入的工具、todo、task、skill、memory、context 内容。
-- `reminder`：当前日期、工作区等运行时事实，作为 `<system-reminder>` 用户消息临时注入。
+- `static`：稳定身份和执行规则。
+- `dynamic`：工具、todo、subagent、skill、memory 指引等能力信息。
+- system 尾层：当前日期、工作区、操作系统和 shell 等运行时事实。
+
+这些 system 内容保持稳定顺序；工具循环只在历史消息尾部追加 assistant/tool result，
+不再临时插入并删除 `<system-reminder>` 用户消息。LLM memory 每个外部用户回合只选择
+一次，选中内容随该回合用户消息持久化。DeepSeek 的上下文缓存自动生效，不发送会被
+忽略的 `cache_control`；命中率按 provider 返回的缓存读取 token / prompt 输入 token
+计算。
 
 内置模板在：
 

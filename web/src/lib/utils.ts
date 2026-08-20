@@ -46,7 +46,12 @@ export function formatNumber(value?: number | null) {
 export function tokenTotal(usage?: TokenUsage | null) {
   if (!usage || usage.available === false) return null;
   if (usage.total_tokens != null) return usage.total_tokens;
-  const known = [usage.input_tokens, usage.output_tokens].filter((item): item is number => item != null);
+  const known = [
+    usage.input_tokens,
+    usage.output_tokens,
+    usage.cache_creation_input_tokens,
+    usage.cache_read_input_tokens,
+  ].filter((item): item is number => item != null);
   return known.length ? known.reduce((sum, value) => sum + value, 0) : null;
 }
 

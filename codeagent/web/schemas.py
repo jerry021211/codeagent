@@ -45,6 +45,86 @@ class ConversationResponse(ApiModel):
     last_message: str | None = None
     active_run_id: str | None = None
     run_status: str | None = None
+    active_task_list_id: str | None = None
+
+
+class CreateTaskListRequest(ApiModel):
+    name: str = Field(min_length=1, max_length=200)
+    workspace: str | None = Field(default=None, min_length=1, max_length=4096)
+
+
+class UpdateTaskListRequest(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    expectedRevision: int = Field(ge=1)
+
+
+class BindTaskListRequest(ApiModel):
+    taskListId: str = Field(min_length=1, max_length=200)
+
+
+class TaskListResponse(ApiModel):
+    id: str
+    workspace: str
+    name: str
+    scope: Literal["conversation_private", "workspace_shared"]
+    originConversationId: str | None = None
+    revision: int
+    createdAt: str
+    updatedAt: str
+    archivedAt: str | None = None
+
+
+class CreateTaskRequest(ApiModel):
+    subject: str = Field(min_length=1, max_length=500)
+    description: str = Field(min_length=1, max_length=100_000)
+    activeForm: str | None = Field(default=None, max_length=500)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateTaskRequest(ApiModel):
+    expectedRevision: int = Field(ge=1)
+    subject: str | None = Field(default=None, min_length=1, max_length=500)
+    description: str | None = Field(default=None, min_length=1, max_length=100_000)
+    activeForm: str | None = Field(default=None, max_length=500)
+    owner: str | None = Field(default=None, max_length=500)
+    status: Literal["pending", "in_progress", "completed"] | None = None
+    addBlocks: list[str] = Field(default_factory=list)
+    addBlockedBy: list[str] = Field(default_factory=list)
+    removeBlocks: list[str] = Field(default_factory=list)
+    removeBlockedBy: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] | None = None
+
+
+class TaskDataResponse(ApiModel):
+    id: str
+    subject: str
+    description: str
+    activeForm: str | None = None
+    owner: str | None = None
+    status: Literal["pending", "in_progress", "completed"]
+    blocks: list[str] = Field(default_factory=list)
+    blockedBy: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskResourceResponse(ApiModel):
+    taskListId: str
+    task: TaskDataResponse
+    revision: int
+    createdAt: str
+    updatedAt: str
+
+
+class TaskActivityResponse(ApiModel):
+    id: int
+    taskListId: str
+    taskId: str
+    eventType: str
+    conversationId: str | None = None
+    runId: str | None = None
+    agentId: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    createdAt: str
 
 
 class MessageResponse(ApiModel):
@@ -96,6 +176,7 @@ class RuntimeConfigResponse(ApiModel):
     workspace: str
     max_tokens: int | None = None
     max_iterations: int | None = None
+    planning_backend: Literal["tasks", "todo"] = "tasks"
     features: dict[str, bool] = Field(default_factory=dict)
 
 
@@ -121,14 +202,23 @@ __all__ = [
     "ApprovalDecisionRequest",
     "ApprovalResponse",
     "ConversationResponse",
+    "BindTaskListRequest",
     "CreateConversationRequest",
     "CreateRunRequest",
     "CreateRunResponse",
+    "CreateTaskListRequest",
+    "CreateTaskRequest",
     "HealthResponse",
     "MessageResponse",
     "RunResponse",
     "RuntimeConfigResponse",
+    "TaskActivityResponse",
+    "TaskDataResponse",
+    "TaskListResponse",
+    "TaskResourceResponse",
     "UpdateConversationRequest",
+    "UpdateTaskListRequest",
+    "UpdateTaskRequest",
     "WorkspaceEntryResponse",
     "WorkspaceListingResponse",
 ]

@@ -90,7 +90,7 @@ class AgentTests(unittest.TestCase):
             },
         )
 
-    def test_task_tool_runs_subagent_with_fresh_messages_and_returns_summary(self) -> None:
+    def test_subagent_tool_runs_with_fresh_messages_and_returns_summary(self) -> None:
         client = SequenceClient(
             [
                 ModelResponse(
@@ -99,7 +99,7 @@ class AgentTests(unittest.TestCase):
                         {
                             "type": "tool_use",
                             "id": "toolu_parent",
-                            "name": "task",
+                            "name": "subagent",
                             "input": {"description": "inspect the project"},
                         }
                     ],
@@ -136,10 +136,11 @@ class AgentTests(unittest.TestCase):
             client.calls[1]["messages"][0],
             {"role": "user", "content": "inspect the project"},
         )
-        self.assertIn("system-reminder", client.calls[1]["messages"][1]["content"])
+        self.assertEqual(len(client.calls[1]["messages"]), 1)
+        self.assertIn("Current workspace:", client.calls[1]["system"])
         subagent_tool_names = {tool["name"] for tool in client.calls[1]["tools"]}
         self.assertIn("echo", subagent_tool_names)
-        self.assertNotIn("task", subagent_tool_names)
+        self.assertNotIn("subagent", subagent_tool_names)
         self.assertEqual(
             agent.messages[2]["content"][0],
             {
@@ -158,7 +159,7 @@ class AgentTests(unittest.TestCase):
                         {
                             "type": "tool_use",
                             "id": "toolu_parent",
-                            "name": "task",
+                            "name": "subagent",
                             "input": {"description": "inspect markers"},
                         }
                     ],
@@ -191,7 +192,7 @@ class AgentTests(unittest.TestCase):
             ],
         )
 
-    def test_task_guidance_is_added_when_subagents_are_enabled(self) -> None:
+    def test_subagent_guidance_is_added_when_subagents_are_enabled(self) -> None:
         class CaptureClient:
             def __init__(self) -> None:
                 self.system_prompt = ""
@@ -213,7 +214,7 @@ class AgentTests(unittest.TestCase):
         agent.run("do work")
 
         self.assertIn("base prompt", client.system_prompt)
-        self.assertIn("Use the task tool", client.system_prompt)
+        self.assertIn("Use the subagent tool", client.system_prompt)
 
     def test_agent_injects_before_model_call_reminders(self) -> None:
         class EndTurnClient:
@@ -366,9 +367,86 @@ class AgentTests(unittest.TestCase):
             agent.run("Explain agent.py")
 
             self.assertIn("selected_memories", client.calls[0]["messages"][0]["content"])
-            self.assertIn("Selected long-term memories", client.calls[1]["system"])
-            self.assertIn("explain the call chain first", client.calls[1]["system"])
+            turn_content = client.calls[1]["messages"][0]["content"]
+            self.assertIn("Selected long-term memories", turn_content[0]["text"])
+            self.assertIn("explain the call chain first", turn_content[0]["text"])
+            self.assertEqual(turn_content[1]["text"], "Explain agent.py")
+            self.assertNotIn("Selected long-term memories", client.calls[1]["system"])
             self.assertNotIn("Available memories:", client.calls[1]["system"])
+
+    def test_memory_selection_runs_once_during_tool_loop(self) -> None:
+        class SelectionClient:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def fork(self, **kwargs):
+                return self
+
+            def create_message(self, **kwargs):
+                self.calls.append(deepcopy(kwargs))
+                if len(self.calls) == 1:
+                    return ModelResponse(
+                        stop_reason="end_turn",
+                        content=[
+                            {
+                                "type": "text",
+                                "text": '{"selected_memories":["project-style.md"]}',
+                            }
+                        ],
+                    )
+                if len(self.calls) == 2:
+                    return ModelResponse(
+                        stop_reason="tool_use",
+                        content=[
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_1",
+                                "name": "echo",
+                                "input": {},
+                            }
+                        ],
+                    )
+                return ModelResponse(
+                    stop_reason="end_turn",
+                    content=[{"type": "text", "text": "done"}],
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = MemoryStore(Path(temp_dir))
+            store.remember(
+                name="Project Style",
+                memory_type="project",
+                description="Explain call chains first.",
+                content="For this project, explain the call chain first.",
+            )
+            tools = ToolRegistry()
+            tools.register_handler(
+                ToolDefinition(
+                    name="echo",
+                    description="Echo.",
+                    input_schema={"type": "object", "properties": {}},
+                ),
+                lambda: "ok",
+            )
+            client = SelectionClient()
+            agent = Agent(
+                client=client,
+                tools=tools,
+                config=AgentConfig(model="deepseek-v4-pro", system_prompt="base"),
+                memory_manager=MemoryManager(
+                    store,
+                    MemoryConfig(selection_mode="llm"),
+                ),
+            )
+
+            result = agent.run("Inspect the project")
+
+            self.assertEqual(result.final_text, "done")
+            self.assertEqual(len(client.calls), 3)
+            self.assertEqual(
+                client.calls[2]["messages"][: len(client.calls[1]["messages"])],
+                client.calls[1]["messages"],
+            )
 
     def test_agent_recovers_from_max_tokens_by_retrying_with_more_tokens(self) -> None:
         client = SequenceClient(

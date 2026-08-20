@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git clone *)",
+      "Bash(python -m venv .venv)",
+      "Bash(.venv/Scripts/python.exe -m pip install --upgrade pip)",
+      "Bash(.venv/Scripts/python.exe -m pip install -e .)",
+      "Bash(.venv/Scripts/python.exe -c \"import deepseek_eyes, importlib.metadata as m; print\\('pkg ok'\\); print\\([ep for ep in m.entry_points\\(group='console_scripts'\\) if 'deepseek' in ep.name]\\)\")",
+      "Bash(cd /d/new_codeAgent && echo \"--- project .claude ---\" && ls -la .claude/ 2>/dev/null; echo \"--- .mcp.json ---\" && ls -la .mcp.json 2>/dev/null; echo \"--- global .claude ---\" && ls -la /c/Users/Administrator/.claude/ 2>/dev/null; echo \"--- venv python abs path ---\" && ls -la /d/new_codeAgent/deepseek-eyes/.venv/Scripts/python.exe)",
+      "Read(//c/Users/Administrator/.claude//**)",
+      "Read(//c/Users/Administrator/.claude/**)",
+      "Bash(claude --version)",
+      "Bash(claude mcp *)",
+      "Read(//c/Users/Administrator/**)",
+      "Bash(python -c \"import json,os; p=os.path.expanduser\\('~/.claude.json'\\); d=json.load\\(open\\(p\\)\\); print\\('top-level keys:', list\\(d.keys\\(\\)\\)\\); print\\('mcpServers:', json.dumps\\(d.get\\('mcpServers'\\), ensure_ascii=False\\)[:2000]\\)\")",
+      "Bash(python -c \"import json,os; p=os.path.expanduser\\('~/.claude.json'\\); d=json.load\\(open\\(p, encoding='utf-8'\\)\\); print\\('top-level keys:', list\\(d.keys\\(\\)\\)\\); print\\('mcpServers:', json.dumps\\(d.get\\('mcpServers'\\), ensure_ascii=False\\)[:2000]\\)\")",
+      "Read(//c/Users/Administrator/.local/bin/**)",
+      "Read(//c/Users/Administrator/AppData/Roaming/**)",
+      "Read(//c/Users/Administrator/AppData/Local/Programs/**)",
+      "Bash(npm root *)",
+      "Read(//c/Users/Administrator/AppData/**)",
+      "Read(//c/Users/Administrator/.local/**)",
+      "Read(//c/nvm4w/nodejs/**)",
+      "Read(//c/nvm4w/nodejs/node_modules/**)",
+      "Bash(/c/nvm4w/nodejs/claude.cmd --version)",
+      "Read(//c/Users/Administrator/AppData/Local/nvm/v22.14.0/**)",
+      "Read(//c/nvm4w/nodejs//**)",
+      "Bash(\"/c/Users/Administrator/AppData/Local/nvm/v22.14.0/claude.cmd\" --version)",
+      "Bash(\"/c/Users/Administrator/AppData/Local/nvm/v22.14.0/claude.cmd\" mcp *)",
+      "Bash(.venv/Scripts/python.exe -m pip install \"mcp>=1.0.0,<2.0.0\")",
+      "Bash(\"D:/new_codeAgent/deepseek-eyes/.venv/Scripts/python.exe\" /tmp/mcp_test.py)",
+      "mcp__deepseek-eyes__analyze_clipboard"
+    ]
+  }
+}

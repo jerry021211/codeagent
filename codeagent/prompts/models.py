@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from codeagent.messages import Message
+from codeagent.runtime_platform import RuntimePlatform
 
 PromptSection = Literal["static", "dynamic", "reminder"]
 
@@ -45,7 +46,6 @@ class PromptFragment:
     source: str
     tags: tuple[str, ...] = ()
     budget_chars: int | None = None
-    cacheable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +73,7 @@ class PromptBuildContext:
     skill_catalog: str = ""
     context_summary: str = ""
     current_date: str = ""
+    runtime_platform: RuntimePlatform | None = None
     extra_reminders: list[str] = field(default_factory=list)
     config: PromptConfig = field(default_factory=PromptConfig)
 

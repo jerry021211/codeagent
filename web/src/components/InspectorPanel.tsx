@@ -5,7 +5,6 @@ import {
   Braces,
   Check,
   ChevronDown,
-  Circle,
   CircleAlert,
   Clock3,
   Coins,
@@ -13,35 +12,46 @@ import {
   FileCode2,
   GitBranch,
   Hash,
-  ListChecks,
   RefreshCcw,
   X,
 } from "lucide-react";
 import type { RuntimeConfig } from "@/types/api";
+import type { TaskList, TaskResource } from "@/types/api";
 import type { RunViewState } from "@/store/runStore";
 import { cx, formatDuration, formatNumber, formatTime, isRunActive, prettyJson, statusLabel, tokenTotal } from "@/lib/utils";
 import { EmptyPanel, IconButton, StatusDot } from "@/components/ui";
+import { TaskPlan } from "@/components/TaskPlan";
 
 type Props = {
   run?: RunViewState;
   runtime?: RuntimeConfig;
   mobile?: boolean;
   onClose?: () => void;
+  tasks?: TaskResource[];
+  tasksLoading?: boolean;
+  taskBusy?: boolean;
+  taskList?: TaskList;
+  taskLists?: TaskList[];
+  onContinueTask?: (task: TaskResource) => void;
+  onCreateTask?: (input: { subject: string; description: string; activeForm?: string }) => void;
+  onSelectTaskList?: (taskListId: string) => void;
+  onPromoteTaskList?: () => void;
 };
 
-export function InspectorPanel({ run, runtime, mobile, onClose }: Props) {
-  const [tab, setTab] = useState<"run" | "debug">("run");
+export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], tasksLoading, taskBusy, taskList, taskLists, onContinueTask, onCreateTask, onSelectTaskList, onPromoteTaskList }: Props) {
+  const [tab, setTab] = useState<"run" | "tasks" | "debug">("tasks");
   return (
     <aside className="flex h-full min-h-0 w-full flex-col border-l border-line bg-surface">
       <header className="flex h-16 shrink-0 items-center justify-between border-b border-line px-4">
         <div className="flex h-full items-end gap-5">
           <Tab active={tab === "run"} onClick={() => setTab("run")}>运行</Tab>
+          <Tab active={tab === "tasks"} onClick={() => setTab("tasks")}>任务</Tab>
           <Tab active={tab === "debug"} onClick={() => setTab("debug")}>调试</Tab>
         </div>
         {mobile && onClose && <IconButton label="关闭运行面板" onClick={onClose}><X className="size-4" /></IconButton>}
       </header>
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
-        {tab === "run" ? <RunInspector run={run} runtime={runtime} /> : <DebugInspector run={run} runtime={runtime} />}
+        {tab === "run" ? <RunInspector run={run} runtime={runtime} /> : tab === "tasks" ? <TaskPlan tasks={tasks} loading={tasksLoading} busy={taskBusy} taskList={taskList} taskLists={taskLists} onContinue={onContinueTask ?? (() => undefined)} onCreate={onCreateTask ?? (() => undefined)} onSelectList={onSelectTaskList} onPromote={onPromoteTaskList} /> : <DebugInspector run={run} runtime={runtime} />}
       </div>
     </aside>
   );
@@ -52,7 +62,7 @@ function Tab({ active, onClick, children }: { active: boolean; onClick: () => vo
 }
 
 function RunInspector({ run, runtime }: { run?: RunViewState; runtime?: RuntimeConfig }) {
-  if (!run) return <EmptyPanel icon={<Activity className="size-5" />} title="没有正在观察的运行" body="发送消息后，这里会汇总进度、Token、TODO 和 Agent 状态。" />;
+  if (!run) return <EmptyPanel icon={<Activity className="size-5" />} title="没有正在观察的运行" body="发送消息后，这里会汇总进度、Token 和 Agent 状态。" />;
   const activeAction = [...run.actionOrder].reverse().map((id) => run.actions[id]).find((action) => action?.status === "running" || action?.status === "waiting");
   const agents = Object.values(run.agents);
   return (
@@ -72,10 +82,6 @@ function RunInspector({ run, runtime }: { run?: RunViewState; runtime?: RuntimeC
         <TokenPanel run={run} model={runtime?.model} />
       </Section>
 
-      <Section title="TODO" icon={<ListChecks className="size-3.5" />} count={run.todos.length}>
-        {run.todos.length ? <div className="space-y-1.5">{run.todos.map((todo) => <div key={todo.id} className="flex gap-2 rounded-xl border border-line px-3 py-2.5"><span className={cx("mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border", todo.status === "completed" ? "border-success/30 bg-success/10 text-success" : todo.status === "in_progress" ? "border-accent/30 bg-accent/10 text-accent" : "border-line text-ink-faint")}>{todo.status === "completed" ? <Check className="size-2.5" /> : todo.status === "in_progress" ? <span className="size-1.5 rounded-full bg-accent animate-pulse motion-reduce:animate-none" /> : <Circle className="size-2.5" />}</span><span className={cx("text-[11px] leading-4", todo.status === "completed" ? "text-ink-faint line-through" : "text-ink")}>{todo.content}</span></div>)}</div> : <MutedEmpty text="Agent 尚未创建 TODO" />}
-      </Section>
-
       <Section title="Agent" icon={<GitBranch className="size-3.5" />} count={agents.length}>
         {agents.length ? <div className="space-y-1.5">{agents.map((agent) => <div key={agent.id} className={cx("rounded-xl border border-line px-3 py-2.5", agent.parent_id && "ml-3 border-violet-500/20")}><div className="flex items-center gap-2"><Bot className={cx("size-3.5", agent.parent_id ? "text-violet-500" : "text-accent")} /><span className="min-w-0 flex-1 truncate text-[11px] font-medium text-ink">{agent.label}</span><StatusDot status={agent.status === "running" ? "running" : agent.status === "failed" ? "error" : agent.status === "completed" ? "success" : "idle"} pulse={agent.status === "running"} /></div>{agent.task && <p className="mt-1.5 line-clamp-2 text-[10px] leading-4 text-ink-muted">{agent.task}</p>}</div>)}</div> : <MutedEmpty text="没有子 Agent 活动" />}
       </Section>
@@ -93,11 +99,12 @@ function RunInspector({ run, runtime }: { run?: RunViewState; runtime?: RuntimeC
 
 function TokenPanel({ run, model }: { run: RunViewState; model?: string | null }) {
   const total = tokenTotal(run.usage);
-  return <div className="overflow-hidden rounded-2xl border border-line"><div className="bg-surface-muted px-3.5 py-3"><div className="flex items-end justify-between"><div><div className="text-[9px] uppercase tracking-wider text-ink-faint">Run total</div><div className="mt-1 text-xl font-semibold tracking-tight text-ink">{formatNumber(total)}</div></div><span className="max-w-28 truncate font-mono text-[9px] text-ink-muted" title={run.usage.model || model || ""}>{run.usage.model || model || "—"}</span></div></div><div className="grid grid-cols-2 divide-x divide-y divide-line border-t border-line"><Metric label="输入" value={run.usage.input_tokens} /><Metric label="输出" value={run.usage.output_tokens} /><Metric label="缓存写入" value={run.usage.cache_creation_input_tokens} /><Metric label="缓存读取" value={run.usage.cache_read_input_tokens} /></div>{run.usageByCall.length > 0 && <div className="border-t border-line px-3 py-2 text-[9px] text-ink-muted">已记录 {run.usageByCall.length} 次模型调用{run.usage.estimated ? " · 含估算值" : ""}</div>}</div>;
+  const hitRatio = run.usage.cache_hit_ratio;
+  return <div className="overflow-hidden rounded-2xl border border-line"><div className="bg-surface-muted px-3.5 py-3"><div className="flex items-end justify-between"><div><div className="text-[9px] uppercase tracking-wider text-ink-faint">Run total</div><div className="mt-1 text-xl font-semibold tracking-tight text-ink">{formatNumber(total)}</div></div><span className="max-w-28 truncate font-mono text-[9px] text-ink-muted" title={run.usage.model || model || ""}>{run.usage.model || model || "—"}</span></div></div><div className="grid grid-cols-2 divide-x divide-y divide-line border-t border-line"><Metric label="未缓存输入" value={run.usage.input_tokens} /><Metric label="缓存读取" value={run.usage.cache_read_input_tokens} /><Metric label="缓存命中率" value={hitRatio == null ? null : `${(hitRatio * 100).toFixed(1)}%`} /><Metric label="输出" value={run.usage.output_tokens} /></div>{run.usageByCall.length > 0 && <div className="border-t border-line px-3 py-2 text-[9px] text-ink-muted">已记录 {run.usageByCall.length} 次模型调用{run.usage.estimated ? " · 含估算值" : ""}</div>}</div>;
 }
 
-function Metric({ label, value }: { label: string; value?: number | null }) {
-  return <div className="px-3 py-2.5"><div className="text-[9px] text-ink-faint">{label}</div><div className="mt-0.5 font-mono text-[11px] text-ink">{formatNumber(value)}</div></div>;
+function Metric({ label, value }: { label: string; value?: number | string | null }) {
+  return <div className="px-3 py-2.5"><div className="text-[9px] text-ink-faint">{label}</div><div className="mt-0.5 font-mono text-[11px] text-ink">{typeof value === "number" ? formatNumber(value) : value ?? "不可用"}</div></div>;
 }
 
 function DebugInspector({ run, runtime }: { run?: RunViewState; runtime?: RuntimeConfig }) {

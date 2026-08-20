@@ -20,6 +20,41 @@ export type Conversation = {
   last_message?: string | null;
   active_run_id?: Identifier | null;
   run_status?: RunStatus | null;
+  active_task_list_id?: Identifier | null;
+};
+
+export type TaskStatus = "pending" | "in_progress" | "completed";
+
+export type TaskRecord = {
+  id: string;
+  subject: string;
+  description: string;
+  activeForm?: string | null;
+  owner?: string | null;
+  status: TaskStatus;
+  blocks: string[];
+  blockedBy: string[];
+  metadata: Record<string, unknown>;
+};
+
+export type TaskResource = {
+  taskListId: string;
+  task: TaskRecord;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TaskList = {
+  id: string;
+  workspace: string;
+  name: string;
+  scope: "conversation_private" | "workspace_shared";
+  originConversationId?: string | null;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt?: string | null;
 };
 
 export type MessageRole = "user" | "assistant" | "system";
@@ -41,6 +76,8 @@ export type TokenUsage = {
   output_tokens?: number | null;
   cache_creation_input_tokens?: number | null;
   cache_read_input_tokens?: number | null;
+  prompt_input_tokens?: number | null;
+  cache_hit_ratio?: number | null;
   total_tokens?: number | null;
   estimated?: boolean;
   available?: boolean;
@@ -76,6 +113,7 @@ export type RuntimeConfig = {
   workspace: string;
   max_tokens?: number | null;
   max_iterations?: number | null;
+  planning_backend?: "tasks" | "todo";
   features?: Record<string, boolean>;
 };
 

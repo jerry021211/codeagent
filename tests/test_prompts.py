@@ -17,7 +17,7 @@ class PromptRuntimeTests(unittest.TestCase):
             model="fake-model",
             tool_schemas=[
                 {"name": "todo_write"},
-                {"name": "task"},
+                {"name": "subagent"},
                 {"name": "load_skill"},
             ],
             skill_catalog="Available skills:\n- python-refactor: Refactor Python.",
@@ -25,23 +25,42 @@ class PromptRuntimeTests(unittest.TestCase):
 
         self.assertIn("base prompt", result.system_prompt)
         self.assertIn("call todo_write before", result.system_prompt)
-        self.assertIn("Use the task tool", result.system_prompt)
+        self.assertIn("Use the subagent tool", result.system_prompt)
         self.assertIn("Available skills:", result.system_prompt)
         self.assertIn("SYSTEM_PROMPT_DYNAMIC_BOUNDARY", result.system_prompt)
-        self.assertTrue(result.reminder_messages)
+        self.assertIn("Current workspace:", result.system_prompt)
+        self.assertFalse(result.reminder_messages)
 
-    def test_subagent_mode_does_not_include_task_guidance(self) -> None:
+    def test_subagent_mode_does_not_include_subagent_guidance(self) -> None:
         runtime = PromptRuntime(workspace=Path.cwd())
 
         result = runtime.assemble(
             mode=PromptMode.SUBAGENT,
             base_system_prompt="base prompt",
             model="fake-model",
-            tool_schemas=[{"name": "task"}, {"name": "read_file"}],
+            tool_schemas=[{"name": "subagent"}, {"name": "read_file"}],
         )
 
         self.assertIn("focused coding subagent", result.system_prompt)
-        self.assertNotIn("Use the task tool", result.system_prompt)
+        self.assertNotIn("Use the subagent tool", result.system_prompt)
+
+    def test_task_guidance_replaces_todo_guidance(self) -> None:
+        runtime = PromptRuntime(workspace=Path.cwd())
+
+        result = runtime.assemble(
+            mode=PromptMode.NORMAL,
+            base_system_prompt="base prompt",
+            model="fake-model",
+            tool_schemas=[
+                {"name": "TaskCreate"},
+                {"name": "TaskGet"},
+                {"name": "TaskList"},
+                {"name": "TaskUpdate"},
+            ],
+        )
+
+        self.assertIn("Perform the work directly in this conversation", result.system_prompt)
+        self.assertNotIn("call todo_write before", result.system_prompt)
 
     def test_project_template_overrides_builtin_template(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

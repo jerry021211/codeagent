@@ -23,15 +23,23 @@ try:  # Keep the core/CLI package importable without optional web dependencies.
     from codeagent.web.schemas import (
         ApprovalDecisionRequest,
         ApprovalResponse,
+        BindTaskListRequest,
         ConversationResponse,
         CreateConversationRequest,
         CreateRunRequest,
         CreateRunResponse,
+        CreateTaskListRequest,
+        CreateTaskRequest,
         HealthResponse,
         MessageResponse,
         RunResponse,
         RuntimeConfigResponse,
+        TaskActivityResponse,
+        TaskListResponse,
+        TaskResourceResponse,
         UpdateConversationRequest,
+        UpdateTaskListRequest,
+        UpdateTaskRequest,
         WorkspaceListingResponse,
     )
 except ImportError as exc:  # pragma: no cover - exercised only in a core-only install.
@@ -55,6 +63,7 @@ from codeagent.web.storage import (
     StorageConflictError,
 )
 from codeagent.web.workspaces import WorkspaceCatalog
+from codeagent.tasks import TaskActivityRecord, TaskListRecord, TaskResource
 
 
 _SESSION_COOKIE = "codeagent_session"
@@ -99,7 +108,7 @@ def create_app(
             runtime_env = runtime_env or EnvironmentConfig.from_env()
             scheduler = RunScheduler(
                 repo,
-                WebAgentFactory(runtime_env, workspace_path),
+                WebAgentFactory(runtime_env, workspace_path, repo),
             )
         except (ImportError, RuntimeError) as exc:
             if owns_repository:
@@ -310,6 +319,193 @@ def create_app(
         _require_conversation(repo, conversation_id)
         return [_message_response(item) for item in repo.list_messages(conversation_id)]
 
+    @app.get("/api/task-lists", response_model=list[TaskListResponse])
+    def list_task_lists(
+        workspace: str | None = Query(default=None, max_length=4096),
+        archived: bool = Query(default=False),
+    ) -> list[TaskListResponse]:
+        selected = workspace_catalog.resolve(workspace or workspace_path)
+        return [
+            _task_list_response(item)
+            for item in repo.list_task_lists(
+                workspace=str(selected), include_archived=archived
+            )
+        ]
+
+    @app.post(
+        "/api/task-lists",
+        response_model=TaskListResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_task_list(body: CreateTaskListRequest) -> TaskListResponse:
+        selected = workspace_catalog.resolve(body.workspace or workspace_path)
+        return _task_list_response(
+            repo.create_task_list(
+                workspace=str(selected),
+                name=body.name,
+                scope="workspace_shared",
+            )
+        )
+
+    @app.get("/api/task-lists/{task_list_id}", response_model=TaskListResponse)
+    def get_task_list(task_list_id: str) -> TaskListResponse:
+        return _task_list_response(_require_task_list(repo, task_list_id))
+
+    @app.patch("/api/task-lists/{task_list_id}", response_model=TaskListResponse)
+    def update_task_list(
+        task_list_id: str,
+        body: UpdateTaskListRequest,
+    ) -> TaskListResponse:
+        changes: dict[str, Any] = {"expected_revision": body.expectedRevision}
+        if "name" in body.model_fields_set:
+            changes["name"] = body.name
+        return _task_list_response(repo.update_task_list(task_list_id, **changes))
+
+    @app.post(
+        "/api/task-lists/{task_list_id}/promote",
+        response_model=TaskListResponse,
+    )
+    def promote_task_list(task_list_id: str) -> TaskListResponse:
+        return _task_list_response(repo.update_task_list(task_list_id, promote=True))
+
+    @app.post(
+        "/api/task-lists/{task_list_id}/archive",
+        response_model=TaskListResponse,
+    )
+    def archive_task_list(task_list_id: str) -> TaskListResponse:
+        return _task_list_response(repo.update_task_list(task_list_id, archived=True))
+
+    @app.post(
+        "/api/conversations/{conversation_id}/task-list",
+        response_model=ConversationResponse,
+    )
+    def bind_task_list(
+        conversation_id: str,
+        body: BindTaskListRequest,
+    ) -> ConversationResponse:
+        record = repo.bind_conversation_task_list(conversation_id, body.taskListId)
+        return _conversation_response(repo, record)
+
+    @app.get(
+        "/api/task-lists/{task_list_id}/tasks",
+        response_model=list[TaskResourceResponse],
+    )
+    def list_tasks(
+        task_list_id: str,
+        task_status: str | None = Query(default=None, alias="status"),
+        owner: str | None = Query(default=None, max_length=500),
+    ) -> list[TaskResourceResponse]:
+        _require_task_list(repo, task_list_id)
+        return [
+            _task_resource_response(item)
+            for item in repo.list_task_resources(
+                task_list_id, status=task_status, owner=owner
+            )
+        ]
+
+    @app.post(
+        "/api/task-lists/{task_list_id}/tasks",
+        response_model=TaskResourceResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_task(
+        task_list_id: str,
+        body: CreateTaskRequest,
+    ) -> TaskResourceResponse:
+        _require_task_list(repo, task_list_id)
+        return _task_resource_response(
+            repo.create_task(
+                task_list_id,
+                subject=body.subject,
+                description=body.description,
+                active_form=body.activeForm,
+                metadata=body.metadata,
+            )
+        )
+
+    @app.get(
+        "/api/task-lists/{task_list_id}/tasks/{task_id}",
+        response_model=TaskResourceResponse,
+    )
+    def get_task(task_list_id: str, task_id: str) -> TaskResourceResponse:
+        return _task_resource_response(repo.get_task_resource(task_list_id, task_id))
+
+    @app.patch(
+        "/api/task-lists/{task_list_id}/tasks/{task_id}",
+        response_model=TaskResourceResponse,
+    )
+    def update_task(
+        task_list_id: str,
+        task_id: str,
+        body: UpdateTaskRequest,
+    ) -> TaskResourceResponse:
+        aliases = {
+            "activeForm": "active_form",
+            "addBlocks": "add_blocks",
+            "addBlockedBy": "add_blocked_by",
+            "removeBlocks": "remove_blocks",
+            "removeBlockedBy": "remove_blocked_by",
+        }
+        changes = {
+            aliases.get(name, name): getattr(body, name)
+            for name in body.model_fields_set
+            if name != "expectedRevision"
+        }
+        return _task_resource_response(
+            repo.update_task(
+                task_list_id,
+                task_id,
+                changes=changes,
+                expected_revision=body.expectedRevision,
+                human_override=True,
+            )
+        )
+
+    @app.get(
+        "/api/task-lists/{task_list_id}/tasks/{task_id}/activity",
+        response_model=list[TaskActivityResponse],
+    )
+    def list_task_activity(
+        task_list_id: str,
+        task_id: str,
+    ) -> list[TaskActivityResponse]:
+        repo.get_task_resource(task_list_id, task_id)
+        return [
+            _task_activity_response(item)
+            for item in repo.list_task_activity(task_list_id, task_id=task_id)
+        ]
+
+    @app.get("/api/task-lists/{task_list_id}/events")
+    async def stream_task_events(
+        request: Request,
+        task_list_id: str,
+        after: int = Query(default=0, ge=0),
+        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    ) -> StreamingResponse:
+        _require_task_list(repo, task_list_id)
+        cursor = max(after, _parse_event_sequence(last_event_id))
+
+        async def generate() -> AsyncIterator[str]:
+            nonlocal cursor
+            while True:
+                if await request.is_disconnected():
+                    return
+                events = await asyncio.to_thread(
+                    repo.wait_for_task_activity,
+                    task_list_id,
+                    cursor,
+                    _HEARTBEAT_SECONDS,
+                )
+                for event in events:
+                    cursor = max(cursor, event.id)
+                    yield _encode_sse(
+                        event.id,
+                        f"task.{event.event_type}",
+                        _task_activity_response(event).model_dump(),
+                    )
+                if not events:
+                    yield ": heartbeat\n\n"
+
     @app.post(
         "/api/conversations/{conversation_id}/runs",
         response_model=CreateRunResponse,
@@ -415,6 +611,7 @@ def create_app(
             max_iterations=_optional_int(
                 _config_value(runtime_env, "max_iterations")
             ),
+            planning_backend="tasks",
             features={
                 "sse": True,
                 "approvals": True,
@@ -422,6 +619,7 @@ def create_app(
                 "persistence": True,
                 "debug_metadata": True,
                 "workspace_browser": True,
+                "tasks": True,
             },
         )
 
@@ -471,6 +669,16 @@ def _require_run(repository: SQLiteRepository, run_id: str) -> RunRecord:
     return record
 
 
+def _require_task_list(
+    repository: SQLiteRepository,
+    task_list_id: str,
+) -> TaskListRecord:
+    record = repository.get_task_list(task_list_id)
+    if record is None:
+        raise RecordNotFoundError(f"Task list not found: {task_list_id}")
+    return record
+
+
 def _conversation_response(
     repository: SQLiteRepository,
     record: ConversationRecord,
@@ -492,6 +700,38 @@ def _conversation_response(
 
 def _message_response(record: MessageRecord) -> MessageResponse:
     return MessageResponse(**record.to_dict(), status="complete")
+
+
+def _task_list_response(record: TaskListRecord) -> TaskListResponse:
+    return TaskListResponse(
+        id=record.id,
+        workspace=record.workspace,
+        name=record.name,
+        scope=record.scope.value,
+        originConversationId=record.origin_conversation_id,
+        revision=record.revision,
+        createdAt=record.created_at,
+        updatedAt=record.updated_at,
+        archivedAt=record.archived_at,
+    )
+
+
+def _task_resource_response(record: TaskResource) -> TaskResourceResponse:
+    return TaskResourceResponse(**record.to_dict(camel_case=True))
+
+
+def _task_activity_response(record: TaskActivityRecord) -> TaskActivityResponse:
+    return TaskActivityResponse(
+        id=record.id,
+        taskListId=record.task_list_id,
+        taskId=record.task_id,
+        eventType=record.event_type,
+        conversationId=record.conversation_id,
+        runId=record.run_id,
+        agentId=record.agent_id,
+        payload=record.payload,
+        createdAt=record.created_at,
+    )
 
 
 def _run_response(repository: SQLiteRepository, record: RunRecord) -> RunResponse:

@@ -15,6 +15,7 @@ from codeagent.prompts.models import (
     PromptMode,
 )
 from codeagent.prompts.providers import PromptProvider, default_prompt_providers
+from codeagent.runtime_platform import RuntimePlatform, current_runtime_platform
 
 
 class PromptRuntime:
@@ -26,9 +27,11 @@ class PromptRuntime:
         workspace: Path | str,
         config: PromptConfig | None = None,
         providers: list[PromptProvider] | None = None,
+        runtime_platform: RuntimePlatform | None = None,
     ) -> None:
         self.workspace = Path(workspace)
         self.config = config or PromptConfig()
+        self.runtime_platform = runtime_platform or current_runtime_platform()
         self.loader = PromptTemplateLoader(
             workspace=self.workspace,
             template_dir=self.config.template_dir,
@@ -60,6 +63,7 @@ class PromptRuntime:
             skill_catalog=skill_catalog,
             context_summary=context_summary,
             current_date=date.today().isoformat(),
+            runtime_platform=self.runtime_platform,
             extra_reminders=extra_reminders or [],
             config=self.config,
         )
@@ -67,3 +71,13 @@ class PromptRuntime:
         for provider in self.providers:
             fragments.extend(provider.fragments(context))
         return self.assembler.assemble(fragments, context)
+
+    def memory_turn_context(self, selected_memory_context: str) -> str:
+        return "\n\n".join(
+            [
+                self.loader.load("memory_context"),
+                "<selected_memories>",
+                selected_memory_context,
+                "</selected_memories>",
+            ]
+        )

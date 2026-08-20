@@ -339,6 +339,8 @@ class SQLiteRepositoryTests(unittest.TestCase):
 
         self.assertEqual(totals["input_tokens"], 14)
         self.assertEqual(totals["output_tokens"], 6)
+        self.assertEqual(totals["prompt_input_tokens"], 19)
+        self.assertAlmostEqual(totals["cache_hit_ratio"], 3 / 19)
         self.assertEqual(totals["total_tokens"], 25)
         self.assertEqual(totals["model_calls"], 3)
         self.assertEqual(totals["available_calls"], 2)

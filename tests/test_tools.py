@@ -12,8 +12,8 @@ from codeagent.tools import (
     LOAD_SKILL_TOOL_NAME,
     REMEMBER_TOOL_NAME,
     SEARCH_MEMORY_TOOL_NAME,
-    TASK_TOOL_NAME,
-    TaskTool,
+    SUBAGENT_TOOL_NAME,
+    SubagentTool,
     TodoStore,
     TodoWriteTool,
     create_todo_final_status_hook,
@@ -40,23 +40,27 @@ class DefaultToolTests(unittest.TestCase):
         self.assertIn("input_schema", schemas["read_file"])
         self.assertNotIn("function", schemas["read_file"])
 
-    def test_task_tool_delegates_to_injected_spawn_function(self) -> None:
+    def test_subagent_tool_delegates_to_injected_spawn_function(self) -> None:
         calls = []
-        tool = TaskTool(spawn_fn=lambda description: calls.append(description) or "done")
+        tool = SubagentTool(
+            spawn_fn=lambda description: calls.append(description) or "done"
+        )
 
         result = tool.run("inspect the repository")
 
         self.assertEqual(result, "done")
         self.assertEqual(calls, ["inspect the repository"])
-        self.assertEqual(tool.definition.name, TASK_TOOL_NAME)
+        self.assertEqual(tool.definition.name, SUBAGENT_TOOL_NAME)
 
-    def test_default_registry_can_include_task_with_spawn_function(self) -> None:
-        registry = create_default_registry(task_spawn_fn=lambda description: "summary")
+    def test_default_registry_can_include_subagent_with_spawn_function(self) -> None:
+        registry = create_default_registry(
+            subagent_spawn_fn=lambda description: "summary"
+        )
         schemas = {schema["name"]: schema for schema in registry.schemas()}
 
-        self.assertIn(TASK_TOOL_NAME, schemas)
+        self.assertIn(SUBAGENT_TOOL_NAME, schemas)
         self.assertEqual(
-            registry.execute(TASK_TOOL_NAME, {"description": "delegate"}),
+            registry.execute(SUBAGENT_TOOL_NAME, {"description": "delegate"}),
             "summary",
         )
 

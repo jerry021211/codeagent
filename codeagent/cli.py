@@ -11,13 +11,16 @@ from codeagent import (
     EnvironmentConfig,
     MemoryManager,
     MemoryStore,
+    PlanningBackend,
     PromptRuntime,
     RecoveryRuntime,
     SkillLoader,
     TodoStore,
     create_default_hooks,
     create_default_registry,
+    resolve_planning_backend,
 )
+from codeagent.web.storage import SQLiteRepository
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,11 +35,26 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Disable streaming text output even if STREAMING=true.",
     )
+    parser.add_argument(
+        "--planning-mode",
+        choices=("auto", "tasks", "todo"),
+        help="Planning backend. Interactive mode defaults to tasks; one-shot defaults to todo.",
+    )
+    parser.add_argument(
+        "--task-list",
+        help="Use an existing task list when the tasks backend is active.",
+    )
     args = parser.parse_args(argv)
 
     env = EnvironmentConfig.from_env()
     stream = env.stream and not args.no_stream
     workspace = Path.cwd()
+    query = " ".join(args.query).strip()
+    requested_backend = args.planning_mode or env.planning_mode
+    planning_backend = resolve_planning_backend(
+        requested_backend,
+        interactive=not bool(query),
+    )
     skill_loader = create_skill_loader(env, workspace)
     skill_catalog = skill_loader.catalog_prompt() if skill_loader is not None else ""
     recovery_runtime = RecoveryRuntime(
@@ -56,7 +74,24 @@ def main(argv: list[str] | None = None) -> int:
     memory_catalog = (
         memory_manager.catalog_prompt() if memory_manager is not None else ""
     )
-    todo_store = TodoStore()
+    todo_store = TodoStore() if planning_backend is PlanningBackend.TODO else None
+    task_repository = None
+    task_list_id = None
+    if planning_backend is PlanningBackend.TASKS:
+        task_repository = SQLiteRepository.for_workspace(workspace)
+        if args.task_list:
+            task_list = task_repository.get_task_list(args.task_list)
+            if task_list is None:
+                parser.error(f"task list not found: {args.task_list}")
+            if Path(task_list.workspace).resolve() != workspace.resolve():
+                parser.error("task list belongs to another workspace")
+        else:
+            task_list = task_repository.create_task_list(
+                workspace=workspace,
+                name="CLI tasks",
+            )
+        task_list_id = task_list.id
+        print(f"Task list: {task_list_id}")
     context = ContextManager(config=env.context_config, todo_store=todo_store)
     prompt_runtime = PromptRuntime(workspace=workspace, config=env.prompt_config)
     agent = Agent(
@@ -70,9 +105,16 @@ def main(argv: list[str] | None = None) -> int:
             skill_loader=skill_loader,
             memory_store=memory_store,
             memory_max_items=env.memory_config.max_loaded_items,
+            planning_backend=planning_backend,
+            task_service=task_repository,
+            task_list_id=task_list_id,
         ),
-        config=env.to_agent_config(),
-        hooks=create_default_hooks(workspace=workspace, todo_store=todo_store),
+        config=env.to_agent_config(planning_backend=planning_backend),
+        hooks=create_default_hooks(
+            workspace=workspace,
+            todo_store=todo_store,
+            planning_backend=planning_backend,
+        ),
         context=context,
         memory_manager=memory_manager,
         prompt_runtime=prompt_runtime,
@@ -89,7 +131,6 @@ def main(argv: list[str] | None = None) -> int:
         memory_catalog=memory_catalog,
     )
 
-    query = " ".join(args.query).strip()
     if query:
         result = agent.run(query)
         if not stream and result.final_text:

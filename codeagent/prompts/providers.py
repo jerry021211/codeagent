@@ -14,7 +14,7 @@ from codeagent.tools import (
     LOAD_MEMORY_TOOL_NAME,
     REMEMBER_TOOL_NAME,
     SEARCH_MEMORY_TOOL_NAME,
-    TASK_TOOL_NAME,
+    SUBAGENT_TOOL_NAME,
 )
 
 
@@ -121,18 +121,38 @@ class TaskPromptProvider:
         self.loader = loader
 
     def fragments(self, context: PromptBuildContext) -> list[PromptFragment]:
-        if context.mode in {PromptMode.SUBAGENT, PromptMode.SIMPLE}:
-            return []
-        if TASK_TOOL_NAME not in _tool_names(context.tool_schemas):
+        names = set(_tool_names(context.tool_schemas))
+        if context.mode == PromptMode.SIMPLE or "TaskCreate" not in names:
             return []
         return [
             PromptFragment(
-                id="tools.task",
-                content=self.loader.load("task"),
+                id="tools.tasks",
+                content=self.loader.load("tasks"),
+                priority=500,
+                section="dynamic",
+                source="templates/tasks.md",
+                tags=("tasks", "tools"),
+            )
+        ]
+
+
+class SubagentPromptProvider:
+    def __init__(self, loader: PromptTemplateLoader) -> None:
+        self.loader = loader
+
+    def fragments(self, context: PromptBuildContext) -> list[PromptFragment]:
+        if context.mode in {PromptMode.SUBAGENT, PromptMode.SIMPLE}:
+            return []
+        if SUBAGENT_TOOL_NAME not in _tool_names(context.tool_schemas):
+            return []
+        return [
+            PromptFragment(
+                id="tools.subagent",
+                content=self.loader.load("subagent_tool"),
                 priority=600,
                 section="dynamic",
-                source="templates/task.md",
-                tags=("task", "tools"),
+                source="templates/subagent_tool.md",
+                tags=("subagent", "tools"),
             )
         ]
 
@@ -251,6 +271,11 @@ class RuntimeReminderProvider:
             workspace=context.workspace
         )
         reminders.append(workspace)
+        if (
+            context.runtime_platform is not None
+            and "bash" in _tool_names(context.tool_schemas)
+        ):
+            reminders.append(context.runtime_platform.prompt_reminder())
         if context.current_date:
             reminders.append(
                 self.loader.load("date_reminder").format(
@@ -265,10 +290,9 @@ class RuntimeReminderProvider:
                 id="runtime.reminder",
                 content="\n".join(reminders),
                 priority=1000,
-                section="reminder",
+                section="dynamic",
                 source="runtime",
                 tags=("runtime",),
-                cacheable=False,
             )
         ]
 
@@ -282,6 +306,7 @@ def default_prompt_providers(
         ToolPromptProvider(loader),
         TodoPromptProvider(loader),
         TaskPromptProvider(loader),
+        SubagentPromptProvider(loader),
         SkillPromptProvider(loader),
         MemoryPromptProvider(loader),
         ContextSummaryPromptProvider(loader),

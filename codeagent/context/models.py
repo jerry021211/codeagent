@@ -49,7 +49,7 @@ class RuntimeState:
                 _append_unique(self.loaded_skills, name)
             return
 
-        if tool_use.name == "task":
+        if tool_use.name == "subagent":
             self.subagent_results.append(_shorten(output, 1_500))
             self.subagent_results[:] = self.subagent_results[-5:]
             return
@@ -84,7 +84,7 @@ class RuntimeState:
             "User goal:",
             self.user_goal or "(unknown)",
             "",
-            "Current todo:",
+            "Current plan:",
             todo_text or "(not available)",
             "",
             "Loaded skills:",

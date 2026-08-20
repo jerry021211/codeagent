@@ -149,6 +149,8 @@ function mergeUsage(current: TokenUsage, incoming: Record<string, unknown>): Tok
     output_tokens: take("output_tokens") as number | null | undefined,
     cache_creation_input_tokens: take("cache_creation_input_tokens") as number | null | undefined,
     cache_read_input_tokens: take("cache_read_input_tokens") as number | null | undefined,
+    prompt_input_tokens: take("prompt_input_tokens") as number | null | undefined,
+    cache_hit_ratio: take("cache_hit_ratio") as number | null | undefined,
     total_tokens: take("total_tokens") as number | null | undefined,
     estimated: typeof usage.estimated === "boolean" ? usage.estimated : current.estimated,
     available: typeof usage.available === "boolean" ? usage.available : current.available,
@@ -158,13 +160,19 @@ function mergeUsage(current: TokenUsage, incoming: Record<string, unknown>): Tok
 function addUsage(current: TokenUsage, incoming: TokenUsage): TokenUsage {
   const add = (left?: number | null, right?: number | null) =>
     left == null && right == null ? undefined : (left ?? 0) + (right ?? 0);
+  const inputTokens = add(current.input_tokens, incoming.input_tokens);
+  const cacheCreation = add(current.cache_creation_input_tokens, incoming.cache_creation_input_tokens);
+  const cacheRead = add(current.cache_read_input_tokens, incoming.cache_read_input_tokens);
+  const promptInput = (inputTokens ?? 0) + (cacheCreation ?? 0) + (cacheRead ?? 0);
   return {
     model: incoming.model ?? current.model,
     call_kind: incoming.call_kind ?? current.call_kind,
-    input_tokens: add(current.input_tokens, incoming.input_tokens),
+    input_tokens: inputTokens,
     output_tokens: add(current.output_tokens, incoming.output_tokens),
-    cache_creation_input_tokens: add(current.cache_creation_input_tokens, incoming.cache_creation_input_tokens),
-    cache_read_input_tokens: add(current.cache_read_input_tokens, incoming.cache_read_input_tokens),
+    cache_creation_input_tokens: cacheCreation,
+    cache_read_input_tokens: cacheRead,
+    prompt_input_tokens: promptInput,
+    cache_hit_ratio: promptInput ? (cacheRead ?? 0) / promptInput : 0,
     total_tokens: add(current.total_tokens, incoming.total_tokens),
     estimated: Boolean(current.estimated || incoming.estimated),
     available: current.available === false || incoming.available === false ? false : current.available ?? incoming.available,
@@ -236,14 +244,19 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
     const rawFragments = arrayFrom(payload, "fragments") ?? [];
     next.promptTrace = {
       hash: stringFrom(payload, "hash", "prompt_hash") ?? next.promptTrace.hash,
-      characters: asNumber(payload.characters ?? payload.char_count) ?? next.promptTrace.characters,
+      characters: asNumber(payload.characters ?? payload.char_count ?? payload.chars) ?? next.promptTrace.characters,
       fragments: rawFragments.map((item, index) => {
         const row = asRecord(item);
         return {
           name: stringFrom(row, "name", "id") ?? `fragment-${index + 1}`,
           source: stringFrom(row, "source"),
-          characters: asNumber(row.characters ?? row.char_count),
-          truncated: typeof row.truncated === "boolean" ? row.truncated : undefined,
+          characters: asNumber(row.characters ?? row.char_count ?? row.chars),
+          truncated:
+            typeof row.truncated === "boolean"
+              ? row.truncated
+              : typeof row.clipped === "boolean"
+                ? row.clipped
+                : undefined,
         };
       }),
     };

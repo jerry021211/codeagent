@@ -55,6 +55,8 @@ class EventTests(unittest.TestCase):
         self.assertEqual(totals.input_tokens, 15)
         self.assertEqual(totals.output_tokens, 6)
         self.assertEqual(totals.cache_read_input_tokens, 3)
+        self.assertEqual(totals.prompt_input_tokens, 18)
+        self.assertAlmostEqual(totals.cache_hit_ratio, 3 / 18)
         self.assertEqual(totals.total_tokens, 24)
         self.assertEqual(totals.model_calls, 2)
 

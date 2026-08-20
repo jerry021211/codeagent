@@ -18,7 +18,16 @@ from codeagent.tools.memory import (
 from codeagent.tools.read import ReadFileTool
 from codeagent.tools.registry import ToolRegistry
 from codeagent.tools.skill import LOAD_SKILL_TOOL_NAME, LoadSkillTool
-from codeagent.tools.task import TASK_TOOL_NAME, TaskTool
+from codeagent.tools.subagent import SUBAGENT_TOOL_NAME, SubagentTool
+from codeagent.tools.tasks import (
+    TASK_TOOL_NAMES,
+    TaskCreateTool,
+    TaskGetTool,
+    TaskListTool,
+    TaskService,
+    TaskUpdateTool,
+    create_task_tools,
+)
 from codeagent.tools.todo import (
     TodoStore,
     TodoWriteTool,
@@ -44,11 +53,17 @@ __all__ = [
     "LoadMemoryTool",
     "ReadFileTool",
     "REMEMBER_TOOL_NAME",
-    "TASK_TOOL_NAME",
+    "SUBAGENT_TOOL_NAME",
+    "TASK_TOOL_NAMES",
     "SEARCH_MEMORY_TOOL_NAME",
     "RememberTool",
     "SearchMemoryTool",
-    "TaskTool",
+    "SubagentTool",
+    "TaskCreateTool",
+    "TaskGetTool",
+    "TaskListTool",
+    "TaskService",
+    "TaskUpdateTool",
     "TodoStore",
     "Tool",
     "ToolDefinition",
@@ -59,6 +74,7 @@ __all__ = [
     "WorkspaceGuard",
     "WorkspaceViolationError",
     "create_default_registry",
+    "create_task_tools",
     "create_todo_final_status_hook",
     "create_todo_reminder_hook",
     "default_tools",
