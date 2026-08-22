@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from codeagent import (
@@ -77,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     todo_store = TodoStore() if planning_backend is PlanningBackend.TODO else None
     task_repository = None
     task_list_id = None
+    task_state_provider = None
     if planning_backend is PlanningBackend.TASKS:
         task_repository = SQLiteRepository.for_workspace(workspace)
         if args.task_list:
@@ -92,7 +94,21 @@ def main(argv: list[str] | None = None) -> int:
             )
         task_list_id = task_list.id
         print(f"Task list: {task_list_id}")
-    context = ContextManager(config=env.context_config, todo_store=todo_store)
+
+        def task_state() -> str:
+            resources = task_repository.list_task_resources(task_list_id)
+            return json.dumps(
+                [resource.to_dict(camel_case=True) for resource in resources],
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        task_state_provider = task_state
+    context = ContextManager(
+        config=env.context_config,
+        todo_store=todo_store,
+        task_state_provider=task_state_provider,
+    )
     prompt_runtime = PromptRuntime(workspace=workspace, config=env.prompt_config)
     agent = Agent(
         client=env.create_anthropic_client(
@@ -114,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
             workspace=workspace,
             todo_store=todo_store,
             planning_backend=planning_backend,
+            task_state_provider=task_state_provider,
         ),
         context=context,
         memory_manager=memory_manager,

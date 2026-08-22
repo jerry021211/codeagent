@@ -53,13 +53,15 @@ class RecordingEventSink:
             "history_generation": event.payload.get("history_generation"),
             "history_rewritten": event.payload.get("history_rewritten"),
             "rewrite_reason": event.payload.get("rewrite_reason"),
+            "generation_reason": event.payload.get("generation_reason"),
             "previous_message_count": event.payload.get("previous_message_count"),
             "current_message_count": event.payload.get("current_message_count"),
+            "message_count_delta": event.payload.get("message_count_delta"),
             "common_prefix_messages": event.payload.get("common_prefix_messages"),
-            "discarded_prefix_messages": event.payload.get(
-                "discarded_prefix_messages"
+            "previous_suffix_messages": event.payload.get(
+                "previous_suffix_messages"
             ),
-            "appended_messages": event.payload.get("appended_messages"),
+            "current_suffix_messages": event.payload.get("current_suffix_messages"),
             "previous_history_hash": event.payload.get("previous_history_hash"),
             "current_history_hash": event.payload.get("current_history_hash"),
         }

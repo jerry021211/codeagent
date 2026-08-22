@@ -494,7 +494,8 @@ class AgentTests(unittest.TestCase):
                 "ENABLE_SKILLS": "false",
                 "SKILLS_DIR": "project-skills",
                 "CONTEXT_COMPACT_MODE": "model",
-                "CONTEXT_MAX_MESSAGES": "9",
+                "SUMMARIZATION_MODEL_ID": "summary-model",
+                "SUMMARIZATION_API_KEY": "summary-key",
                 "CONTEXT_TOOL_RESULT_BUDGET_CHARS": "111",
                 "ENABLE_MEMORY": "true",
                 "MEMORY_DIR": "project-memory",
@@ -521,7 +522,8 @@ class AgentTests(unittest.TestCase):
         self.assertFalse(env.enable_skills)
         self.assertEqual([str(path) for path in env.skill_roots], ["project-skills"])
         self.assertEqual(env.context_config.mode, "model")
-        self.assertEqual(env.context_config.max_messages, 9)
+        self.assertEqual(env.context_config.summarization_model, "summary-model")
+        self.assertEqual(env.context_config.summarization_api_key, "summary-key")
         self.assertEqual(env.context_config.tool_result_budget_chars, 111)
         self.assertTrue(env.memory_config.enabled)
         self.assertEqual(str(env.memory_config.memory_dir), "project-memory")

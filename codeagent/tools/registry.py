@@ -44,13 +44,19 @@ class ToolRegistry:
             registered = self._tools.get(name)
             if registered is None:
                 output = f"Unknown tool: {name}"
-                tool_trace.end(outputs={"output": output, "status": "unknown_tool"})
+                tool_trace.end(
+                    outputs={"output": output, "status": "unknown_tool"},
+                    error=output,
+                )
                 return output
             try:
                 output = str(registered.handler(**(args or {})))
             except Exception as exc:
                 output = f"Error: {type(exc).__name__}: {exc}"
-                tool_trace.end(outputs={"output": output, "status": "error"})
+                tool_trace.end(
+                    outputs={"output": output, "status": "error"},
+                    error=output,
+                )
                 return output
             tool_trace.end(outputs={"output": output, "status": "ok"})
             return output

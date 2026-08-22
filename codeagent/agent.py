@@ -113,6 +113,11 @@ class Agent:
             self.tools.register(SubagentTool(spawn_fn=self._spawn_subagent))
         if COMPACT_TOOL_NAME not in self.tools:
             self.tools.register(CompactTool(compact_fn=self._request_manual_compact))
+        if self.messages:
+            self.history_observer.restore(
+                generation=self.context.state.history_generation,
+                last_sent=self.messages,
+            )
 
     def add_user_message(self, content: Any) -> None:
         self.messages.append({"role": "user", "content": content})
@@ -181,8 +186,6 @@ class Agent:
                 self.messages = self.context.prepare_before_model_call(
                     self.messages,
                     client=self._context_client(),
-                    model=recovery_state.current_model,
-                    max_tokens=recovery_state.current_max_tokens,
                     event_emitter=self.event_emitter,
                 )
                 reminder = self.hooks.trigger("BeforeModelCall", self.messages)
@@ -195,7 +198,12 @@ class Agent:
                     model=recovery_state.current_model,
                 ) #组装system prompt
                 self._log_prompt_assembly(prompt_assembly) #system prompt加入log
-                history_observation = self.history_observer.observe(self.messages)
+                history_observation = self.history_observer.observe(
+                    self.messages,
+                    generation=self.context.state.history_generation,
+                    generation_reason=self.context.consume_generation_reason(),
+                )
+                self.context.state.history_generation = history_observation.generation
                 history_payload = history_observation.to_event_payload()
                 if history_observation.rewritten:
                     self.event_emitter.emit(
@@ -223,10 +231,7 @@ class Agent:
                     },
                     iteration=iterations,
                 )
-                compact_for_retry = lambda messages: self._compact_for_recovery_retry(
-                    model=recovery_state.current_model,
-                    max_tokens=recovery_state.current_max_tokens,
-                )
+                compact_for_retry = self._compact_for_recovery_retry
                 call_result = self.recovery_runtime.call_model(
                     lambda model, max_tokens, messages: self.client.create_message(
                         model=model,
@@ -259,7 +264,8 @@ class Agent:
                             "stop_reason": result.stop_reason,
                             "iterations": result.iterations,
                             "message_count": len(result.messages),
-                        }
+                        },
+                        error=result.final_text or result.stop_reason,
                     )
                     return result
 
@@ -288,7 +294,8 @@ class Agent:
                             "stop_reason": result.stop_reason,
                             "iterations": result.iterations,
                             "message_count": len(result.messages),
-                        }
+                        },
+                        error=result.final_text or result.stop_reason,
                     )
                     return result
                 if response_recovery.retry:
@@ -327,10 +334,8 @@ class Agent:
                     self._compact_requested = False
                     self.messages = self.context.force_compact(
                         self.messages,
-                        client=self.client,
-                        model=self.config.model,
-                        max_tokens=self.config.max_tokens,
-                        reason="manual compact",
+                        client=self._context_client(),
+                        reason="manual_compact",
                         event_emitter=self.event_emitter,
                     )
 
@@ -348,7 +353,8 @@ class Agent:
                     "stop_reason": result.stop_reason,
                     "iterations": result.iterations,
                     "message_count": len(result.messages),
-                }
+                },
+                error=result.stop_reason,
             )
             return result
 
@@ -363,7 +369,8 @@ class Agent:
                 ]
             },
         ) as tools_trace:
-            results: list[dict[str, Any]] = []
+            raw_outputs: list[str] = []
+            executions: list[dict[str, Any]] = []
             for tool_use in tool_uses:
                 self.event_emitter.emit(
                     "tool.requested",
@@ -401,23 +408,37 @@ class Agent:
                         },
                     )
                     output = self.tools.execute(tool_use.name, tool_use.input)
-                    output = self.context.compact_tool_output(tool_use, output)
                     self.context.record_tool_result(tool_use, output)
                     self.hooks.trigger("PostToolUse", tool_use, output)
                     failed = output.startswith(("Error:", "Unknown tool:"))
+                self._check_cancelled()
+                raw_outputs.append(output)
+                executions.append(
+                    {
+                        "blocked": bool(blocked),
+                        "failed": False if blocked else failed,
+                        "duration_ms": round((time.monotonic() - started_at) * 1000),
+                    }
+                )
+
+            finalized_outputs = self.context.finalize_tool_results(
+                tool_uses, raw_outputs
+            )
+            results: list[dict[str, Any]] = []
+            for tool_use, output, execution in zip(
+                tool_uses, finalized_outputs, executions
+            ):
+                if not execution["blocked"]:
                     self.event_emitter.emit(
-                        "tool.failed" if failed else "tool.completed",
+                        "tool.failed" if execution["failed"] else "tool.completed",
                         {
                             "tool_use_id": tool_use.id,
                             "name": tool_use.name,
                             "input": _public_tool_input(tool_use.name, tool_use.input),
                             "output": _public_tool_output(output),
-                            "duration_ms": round(
-                                (time.monotonic() - started_at) * 1000
-                            ),
+                            "duration_ms": execution["duration_ms"],
                         },
                     )
-                self._check_cancelled()
                 results.append(
                     {
                         "type": "tool_result",
@@ -603,15 +624,11 @@ class Agent:
 
     def _compact_for_recovery_retry(
         self,
-        *,
-        model: str,
-        max_tokens: int,
+        messages: list[Message],
     ) -> list[Message] | None:
         compacted = self.context.reactive_compact(
-            self.messages,
+            messages,
             client=self._context_client(),
-            model=model,
-            max_tokens=max_tokens,
             event_emitter=self.event_emitter,
         )
         if compacted is None:
@@ -652,6 +669,16 @@ class Agent:
         return self.client
 
     def _context_client(self) -> Any:
+        if self.context.config.summarization_api_key:
+            return AnthropicModelClient(
+                api_key=self.context.config.summarization_api_key,
+                base_url=self.client.base_url,
+                stream=False,
+                on_text=None,
+                event_emitter=self.event_emitter,
+                usage_tracker=self.usage_tracker,
+                call_kind="context_summary",
+            )
         fork = getattr(self.client, "fork", None)
         if callable(fork):
             return fork(

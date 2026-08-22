@@ -24,6 +24,12 @@ _DANGEROUS_PATTERNS = [
     (r"\bwget\b.*\|\s*(sudo\s+)?bash", "pipe wget to bash"),
 ]
 
+_TRACE_SUBPROCESS_ENV = "CODEAGENT_TRACE_SUBPROCESSES"
+_TRACING_ENABLE_ENV_VARS = (
+    "LANGSMITH_TRACING",
+    "LANGCHAIN_TRACING_V2",
+)
+
 
 @dataclass(slots=True)
 class BashTool:
@@ -96,6 +102,7 @@ class BashTool:
                 text=True,
                 timeout=timeout,
                 cwd=str(cwd),
+                env=_subprocess_environment(),
             )
 
             if proc.returncode == 0:
@@ -148,6 +155,28 @@ def _check_dangerous(command: str) -> str | None:
         if re.search(pattern, command):
             return reason
     return None
+
+
+def _subprocess_environment() -> dict[str, str]:
+    """Build a child environment without accidental orphan LangSmith traces.
+
+    LangSmith's active parent run is process-local, while environment variables
+    are inherited by shell grandchildren.  Disable tracing flags by default so
+    Python commands launched through this tool do not create unrelated root
+    traces. Child-process tracing remains an explicit opt-in; callers that need
+    a nested hierarchy must also propagate LangSmith parent headers.
+    """
+
+    environment = os.environ.copy()
+    if _env_enabled(environment.get(_TRACE_SUBPROCESS_ENV)):
+        return environment
+    for name in _TRACING_ENABLE_ENV_VARS:
+        environment[name] = "false"
+    return environment
+
+
+def _env_enabled(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _cd_targets(command: str) -> list[str]:

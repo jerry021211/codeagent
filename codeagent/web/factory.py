@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,19 @@ class WebAgentFactory:
             messages = [dict(item) for item in checkpoint.messages]
             state = _restore_runtime_state(checkpoint.context)
 
+        execution = event_emitter.context
+        task_list = self.task_service.ensure_conversation_task_list(
+            execution.conversation_id
+        )
+
+        def task_state() -> str:
+            resources = self.task_service.list_task_resources(task_list.id)
+            return json.dumps(
+                [resource.to_dict(camel_case=True) for resource in resources],
+                ensure_ascii=False,
+                indent=2,
+            )
+
         changed_files = set(state.files_changed)
         context_config = replace(
             self.env.context_config,
@@ -64,6 +78,7 @@ class WebAgentFactory:
             config=context_config,
             state=state,
             todo_store=None,
+            task_state_provider=task_state,
         )
         skill_loader = self._skill_loader()
         memory_store = self._memory_store()
@@ -78,11 +93,6 @@ class WebAgentFactory:
             else None
         )
         usage_tracker = UsageTracker()
-
-        execution = event_emitter.context
-        task_list = self.task_service.ensure_conversation_task_list(
-            execution.conversation_id
-        )
 
         def tools_for():
             return create_default_registry(
@@ -110,6 +120,7 @@ class WebAgentFactory:
             workspace=self.workspace,
             log=lambda _message: None,
             planning_backend=PlanningBackend.TASKS,
+            task_state_provider=task_state,
         )
         client = self.env.create_anthropic_client(
             stream=self.env.stream,

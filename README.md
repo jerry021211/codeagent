@@ -437,24 +437,20 @@ python -m codeagent --no-stream "按照我之前记录过的项目讲解偏好�
 
 ## 上下文压缩：Context Compact
 
-默认启用 `CONTEXT_COMPACT_MODE=simple`。Agent 会在每次模型调用前运行一组
-cheap-first 压缩器，避免长会话、大文件读取和大量工具输出撑爆上下文。
+默认启用 `CONTEXT_COMPACT_MODE=model`。同一代历史只允许在尾部追加，旧消息
+不会因为工具结果变旧而再次改写，因此更利于模型的前缀缓存。
 
-压缩顺序：
+工具结果会在第一次加入 history 前定型：单个结果超过 80k 时保存完整文件并留下
+路径和预览；同一批结果超过 200k 时从最大的结果开始进一步外置，直到整批回到
+预算内。已发送的工具结果之后不再修改。
 
-1. `tool_result_budget`：最后一条 user message 里的工具结果总量超过预算时，
-   把最大输出落盘到 `.task_outputs/tool-results/`，上下文只保留路径和预览。
-2. `snip_compact`：消息数量超过阈值时裁掉中间历史，保留开头和最近上下文，并
-   保证 `assistant(tool_use)` 和后续 `user(tool_result)` 不被拆开。
-3. `micro_compact`：只保留最近几个完整 `tool_result`，旧的大结果替换为占位符。
-4. `compact_history`：仍超过阈值时保存完整 transcript 到 `.transcripts/`，再用
-   `RuntimeState` 生成结构化 `<context_summary>` 替换旧历史。
-5. `reactive_compact`：如果 API 返回 prompt/context too long，会做一次应急压缩
-   并重试，避免无限循环。
+history 超过 300k 时，专用摘要模型生成结构化 checkpoint，完整旧 history 保存到
+`.transcripts/`，摘要成为下一代的起点。自动压缩、手动 `compact()` 和上下文过长
+恢复共用这个入口。换代后的第一次调用会冷启动缓存，之后继续追加并重新预热。
 
-`RuntimeState` 会持续记录用户目标、当前 TODO、已加载 skill、子 Agent 结论、
-改动文件、命令和测试结果。压缩后的摘要不是泛泛总结，而是保留继续工作需要的
-结构化状态。
+`RuntimeState` 会持续记录 generation、读取过的文件范围及次数、各工具调用次数、
+任务进度、改动文件、命令、测试结果和工具 artifact 路径。这些状态会随 checkpoint
+保存，并在摘要时提供给专用模型。
 
 模型也可以主动调用：
 
@@ -467,11 +463,9 @@ compact()
 可配置项：
 
 ```bash
-CONTEXT_COMPACT_MODE=simple   # off | simple | model
-CONTEXT_MAX_MESSAGES=50
-CONTEXT_KEEP_HEAD_MESSAGES=3
-CONTEXT_KEEP_TAIL_MESSAGES=47
-CONTEXT_KEEP_RECENT_TOOL_RESULTS=3
+CONTEXT_COMPACT_MODE=model   # off | model
+SUMMARIZATION_MODEL_ID=your-summary-model
+SUMMARIZATION_API_KEY=your-summary-api-key  # 留空时与主模型共用 API Key
 CONTEXT_TOOL_RESULT_BUDGET_CHARS=200000
 CONTEXT_SINGLE_TOOL_OUTPUT_MAX_CHARS=80000
 CONTEXT_COMPACT_THRESHOLD_CHARS=300000
@@ -479,7 +473,6 @@ CONTEXT_SUMMARY_MAX_CHARS=12000
 CONTEXT_TRANSCRIPT_DIR=.transcripts
 CONTEXT_TOOL_OUTPUT_DIR=.task_outputs/tool-results
 CONTEXT_REACTIVE_RETRIES=1
-CONTEXT_MAX_COMPACT_FAILURES=3
 ```
 
 权限策略参考 `s03_permission` 的三道闸门：

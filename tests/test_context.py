@@ -4,143 +4,134 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codeagent.context import ContextConfig, ContextManager, RuntimeState
+from codeagent.context import (
+    ContextCompactionError,
+    ContextConfig,
+    ContextManager,
+    RuntimeState,
+)
 from codeagent.messages import ToolUse
-from codeagent.tools import TodoStore
+
+
+class SummaryResponse:
+    def __init__(self, text: str) -> None:
+        self.content = [{"type": "text", "text": text}]
+
+
+class SummaryClient:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.calls = []
+
+    def create_message(self, **kwargs):
+        self.calls.append(kwargs)
+        return SummaryResponse(self.responses.pop(0))
 
 
 class ContextManagerTests(unittest.TestCase):
-    def test_compact_tool_output_truncates_single_large_result(self) -> None:
-        manager = ContextManager(
-            config=ContextConfig(single_tool_output_max_chars=10)
-        )
-
-        output = manager.compact_tool_output(
-            ToolUse(id="toolu_1", name="bash", input={"command": "x"}),
-            "abcdefghijklmnopqrstuvwxyz",
-        )
-
-        self.assertIn("[tool output truncated]", output)
-        self.assertIn("original_chars: 26", output)
-        self.assertIn("abcdefghij", output)
-
-    def test_tool_result_budget_persists_large_last_result(self) -> None:
+    def test_tool_results_are_finalized_before_sending(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "outputs"
             manager = ContextManager(
                 config=ContextConfig(
-                    tool_result_budget_chars=20,
-                    tool_output_dir=Path(temp_dir) / "outputs",
+                    summarization_model="summary-model",
+                    single_tool_output_max_chars=500,
+                    tool_result_budget_chars=700,
+                    persisted_preview_chars=80,
+                    tool_output_dir=output_dir,
                 )
             )
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": "toolu_big",
-                            "content": "x" * 100,
-                        }
-                    ],
-                }
+            tool_uses = [
+                ToolUse(id="toolu_1", name="read_file", input={"path": "a.py"}),
+                ToolUse(id="toolu_2", name="read_file", input={"path": "b.py"}),
             ]
 
-            compacted = manager.tool_result_budget(messages)
+            finalized = manager.finalize_tool_results(
+                tool_uses, ["a" * 900, "b" * 450]
+            )
 
-            content = compacted[-1]["content"][0]["content"]
-            self.assertIn("<persisted-output", content)
-            self.assertTrue((Path(temp_dir) / "outputs" / "toolu_big.txt").exists())
+            self.assertLessEqual(sum(map(len, finalized)), 700)
+            self.assertTrue((output_dir / "toolu_1.txt").exists())
+            self.assertIn("只有在当前预览缺少必要信息时", finalized[0])
+            self.assertNotIn("Re-run the tool", "\n".join(finalized))
 
-    def test_snip_compact_keeps_tool_use_and_result_together(self) -> None:
+    def test_history_is_unchanged_below_threshold(self) -> None:
         manager = ContextManager(
             config=ContextConfig(
-                max_messages=5,
-                keep_head_messages=1,
-                keep_tail_messages=4,
+                summarization_model="summary-model",
+                compact_threshold_chars=10_000,
             )
         )
-        messages = [
-            {"role": "user", "content": "start"},
-            {
-                "role": "assistant",
-                "content": [{"type": "tool_use", "id": "toolu_1"}],
-            },
-            {
-                "role": "user",
-                "content": [{"type": "tool_result", "tool_use_id": "toolu_1"}],
-            },
-            {"role": "assistant", "content": "middle"},
-            {"role": "user", "content": "more"},
-            {"role": "assistant", "content": "tail"},
-            {"role": "user", "content": "done"},
-        ]
+        messages = [{"role": "user", "content": "hello"}]
 
-        compacted = manager.snip_compact(messages)
+        prepared = manager.prepare_before_model_call(messages)
 
-        self.assertTrue(any("snipped" in str(message["content"]) for message in compacted))
-        roles = [message["role"] for message in compacted]
-        self.assertEqual(roles[-4:], ["assistant", "user", "assistant", "user"])
+        self.assertIs(prepared, messages)
+        self.assertEqual(manager.state.history_generation, 0)
 
-    def test_micro_compact_replaces_old_tool_results(self) -> None:
-        manager = ContextManager(
-            config=ContextConfig(keep_recent_tool_results=1)
-        )
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "old",
-                        "content": "old output " * 50,
-                    }
-                ],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "new",
-                        "content": "new output " * 50,
-                    }
-                ],
-            },
-        ]
-
-        compacted = manager.micro_compact(messages)
-
-        self.assertIn("Earlier tool result compacted", compacted[0]["content"][0]["content"])
-        self.assertIn("new output", compacted[1]["content"][0]["content"])
-
-    def test_compact_history_uses_runtime_state_and_writes_transcript(self) -> None:
+    def test_first_and_update_summary_start_one_generation_each(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            store = TodoStore(
-                todos=[{"content": "Run tests", "status": "pending"}],
-                revision=1,
-            )
-            state = RuntimeState(user_goal="Refactor hello.py")
-            state.loaded_skills.append("python-refactor")
+            client = SummaryClient(["## Goal\nfirst", "## Goal\nupdated"])
             manager = ContextManager(
                 config=ContextConfig(
+                    summarization_model="summary-model",
                     transcript_dir=Path(temp_dir) / "transcripts",
-                    summary_max_chars=5000,
                 ),
-                state=state,
-                todo_store=store,
+                task_state_provider=lambda: '[{"id":"1","status":"pending"}]',
+            )
+            manager.state.files_read["a.py|0|100"] = {
+                "path": "a.py",
+                "offset": 0,
+                "limit": 100,
+                "count": 3,
+            }
+
+            first = manager.compact_history(
+                [{"role": "user", "content": "inspect a.py"}],
+                reason="auto_compact",
+                client=client,
+            )
+            second = manager.compact_history(
+                first + [{"role": "user", "content": "continue"}],
+                reason="manual_compact",
+                client=client,
             )
 
-            compacted = manager.compact_history(
-                [{"role": "user", "content": "hello"}],
-                reason="test compact",
-            )
+            self.assertIn('generation="1"', first[0]["content"])
+            self.assertIn('generation="2"', second[0]["content"])
+            self.assertEqual(manager.state.history_generation, 2)
+            self.assertIn("<previous-summary>", client.calls[1]["messages"][0]["content"])
+            self.assertIn('"count": 3', client.calls[0]["messages"][0]["content"])
+            self.assertIn('"status":"pending"', client.calls[0]["messages"][0]["content"])
+            self.assertEqual(client.calls[0]["model"], "summary-model")
+            self.assertEqual(client.calls[0]["tools"], [])
+            self.assertEqual(client.calls[0]["max_tokens"], 4000)
+            self.assertEqual(len(list((Path(temp_dir) / "transcripts").glob("*.jsonl"))), 2)
 
-            self.assertEqual(len(compacted), 1)
-            summary = compacted[0]["content"]
-            self.assertIn("Refactor hello.py", summary)
-            self.assertIn("python-refactor", summary)
-            self.assertIn("Run tests", summary)
-            self.assertTrue(list((Path(temp_dir) / "transcripts").glob("*.jsonl")))
+    def test_summary_failure_keeps_history_and_generation(self) -> None:
+        class FailingClient:
+            def create_message(self, **kwargs):
+                raise RuntimeError("summary unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ContextManager(
+                config=ContextConfig(
+                    summarization_model="summary-model",
+                    transcript_dir=Path(temp_dir) / "transcripts",
+                )
+            )
+            messages = [{"role": "user", "content": "important history"}]
+
+            with self.assertRaises(ContextCompactionError):
+                manager.compact_history(
+                    messages,
+                    reason="reactive_compact",
+                    client=FailingClient(),
+                )
+
+            self.assertEqual(messages, [{"role": "user", "content": "important history"}])
+            self.assertEqual(manager.state.history_generation, 0)
+            self.assertFalse((Path(temp_dir) / "transcripts").exists())
 
 
 if __name__ == "__main__":

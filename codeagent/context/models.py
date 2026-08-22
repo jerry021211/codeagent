@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 from codeagent.messages import ToolUse
 
 
 @dataclass(slots=True)
 class ContextConfig:
-    mode: str = "simple"
-    max_messages: int = 50
-    keep_head_messages: int = 3
-    keep_tail_messages: int = 47
-    keep_recent_tool_results: int = 3
+    mode: str = "model"
+    summarization_model: str = ""
+    summarization_api_key: str | None = None
     tool_result_budget_chars: int = 200_000
     single_tool_output_max_chars: int = 80_000
     compact_threshold_chars: int = 300_000
@@ -22,14 +22,20 @@ class ContextConfig:
     transcript_dir: Path = Path(".transcripts")
     tool_output_dir: Path = Path(".task_outputs/tool-results")
     reactive_retries: int = 1
-    max_compact_failures: int = 3
-    keep_reactive_tail_messages: int = 5
     persisted_preview_chars: int = 2_000
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"model", "off"}:
+            raise ValueError("CONTEXT_COMPACT_MODE must be 'model' or 'off'")
 
 
 @dataclass(slots=True)
 class RuntimeState:
     user_goal: str = ""
+    history_generation: int = 0
+    files_read: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tool_call_counts: dict[str, int] = field(default_factory=dict)
+    tool_artifacts: list[str] = field(default_factory=list)
     loaded_skills: list[str] = field(default_factory=list)
     subagent_results: list[str] = field(default_factory=list)
     files_changed: list[str] = field(default_factory=list)
@@ -43,6 +49,23 @@ class RuntimeState:
             self.user_goal = prompt.strip()
 
     def record_tool_result(self, tool_use: ToolUse, output: str) -> None:
+        self.tool_call_counts[tool_use.name] = (
+            self.tool_call_counts.get(tool_use.name, 0) + 1
+        )
+
+        if tool_use.name == "read_file":
+            path = str(
+                tool_use.input.get("file_path") or tool_use.input.get("path") or ""
+            )
+            offset = tool_use.input.get("offset", 1)
+            limit = tool_use.input.get("limit", 2000)
+            key = f"{path}|{offset}|{limit}"
+            record = self.files_read.setdefault(
+                key,
+                {"path": path, "offset": offset, "limit": limit, "count": 0},
+            )
+            record["count"] += 1
+
         if tool_use.name == "load_skill":
             name = str(tool_use.input.get("name", "")).strip()
             if name:
@@ -74,53 +97,20 @@ class RuntimeState:
                 self.test_results.append(f"{command}: {_shorten(output, 1_000)}")
                 self.test_results[:] = self.test_results[-10:]
 
+    def record_tool_artifact(self, path: Path) -> None:
+        _append_unique(self.tool_artifacts, str(path))
+
     def record_transcript(self, path: Path) -> None:
         self.transcripts.append(str(path))
         self.transcripts[:] = self.transcripts[-10:]
 
-    def render_summary(self, todo_text: str | None = None) -> str:
-        sections = [
-            "<context_summary>",
-            "User goal:",
-            self.user_goal or "(unknown)",
-            "",
-            "Current plan:",
-            todo_text or "(not available)",
-            "",
-            "Loaded skills:",
-            _format_list(self.loaded_skills),
-            "",
-            "Files changed:",
-            _format_list(self.files_changed),
-            "",
-            "Commands run:",
-            _format_list(self.commands_run[-10:]),
-            "",
-            "Test results:",
-            _format_list(self.test_results),
-            "",
-            "Subagent results:",
-            _format_list(self.subagent_results),
-            "",
-            "Important notes:",
-            _format_list(self.important_notes),
-            "",
-            "Saved transcripts:",
-            _format_list(self.transcripts),
-            "</context_summary>",
-        ]
-        return "\n".join(sections)
+    def to_summary_source(self) -> str:
+        return json.dumps(asdict(self), ensure_ascii=False, indent=2, default=str)
 
 
 def _append_unique(values: list[str], value: str) -> None:
     if value not in values:
         values.append(value)
-
-
-def _format_list(values: list[str]) -> str:
-    if not values:
-        return "- (none)"
-    return "\n".join(f"- {value}" for value in values)
 
 
 def _looks_like_test_command(command: str) -> bool:

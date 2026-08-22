@@ -26,6 +26,7 @@ from codeagent.tools.tasks import (
     TaskListTool,
     TaskService,
     TaskUpdateTool,
+    create_task_reminder_hook,
     create_task_tools,
 )
 from codeagent.tools.todo import (
@@ -74,6 +75,7 @@ __all__ = [
     "WorkspaceGuard",
     "WorkspaceViolationError",
     "create_default_registry",
+    "create_task_reminder_hook",
     "create_task_tools",
     "create_todo_final_status_hook",
     "create_todo_reminder_hook",

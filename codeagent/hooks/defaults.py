@@ -11,6 +11,7 @@ from codeagent.permissions import PermissionPolicy
 from codeagent.planning import PlanningBackend
 from codeagent.tools import (
     TodoStore,
+    create_task_reminder_hook,
     create_todo_final_status_hook,
     create_todo_reminder_hook,
 )
@@ -26,6 +27,8 @@ def create_default_hooks(
     large_output_limit: int = 100_000,
     todo_store: TodoStore | None = None,
     todo_reminder_interval: int = 3,
+    task_state_provider: Callable[[], str] | None = None,
+    task_reminder_interval: int = 5,
     planning_backend: PlanningBackend | str = PlanningBackend.TODO,
 ) -> HookManager:
     hooks = HookManager()
@@ -38,6 +41,14 @@ def create_default_hooks(
         hooks.register(
             "BeforeModelCall",
             create_todo_reminder_hook(store, interval=todo_reminder_interval),
+        )
+    elif task_state_provider is not None:
+        hooks.register(
+            "BeforeModelCall",
+            create_task_reminder_hook(
+                task_state_provider,
+                interval=task_reminder_interval,
+            ),
         )
     hooks.register("PreToolUse", _permission_hook(policy))
     hooks.register("PreToolUse", _tool_log(log))

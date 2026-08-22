@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -243,6 +243,91 @@ def create_task_tools(
     )
 
 
+def create_task_reminder_hook(
+    task_state_provider: Callable[[], str],
+    *,
+    interval: int = 5,
+):
+    """Remind the model when persistent task progress has gone stale."""
+
+    last_activity_count = 0
+    rounds_since_update = 0
+    initialized = False
+
+    def hook(messages: list[dict[str, Any]]) -> str | None:
+        nonlocal initialized, last_activity_count, rounds_since_update
+
+        if interval <= 0:
+            return None
+
+        activity_count = _task_activity_count(messages)
+        if not initialized:
+            initialized = True
+            last_activity_count = activity_count
+            return None
+
+        if activity_count != last_activity_count:
+            last_activity_count = activity_count
+            rounds_since_update = 0
+            return None
+
+        if not any(message.get("role") == "assistant" for message in messages):
+            return None
+
+        rounds_since_update += 1
+        if rounds_since_update < interval:
+            return None
+
+        rounds_since_update = 0
+        open_tasks = _open_task_state(task_state_provider())
+        if not open_tasks:
+            return None
+
+        return "\n".join(
+            [
+                "<reminder>Persistent tasks have not been updated for "
+                f"{interval} model calls.",
+                "Review the current stage before continuing. Mark completed work, "
+                "start the next ready stage, and do not expand the investigation "
+                "without a specific remaining gap.",
+                open_tasks,
+                "</reminder>",
+            ]
+        )
+
+    return hook
+
+
+def _task_activity_count(messages: list[dict[str, Any]]) -> int:
+    count = 0
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        count += sum(
+            1
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "tool_use"
+            and block.get("name") in {"TaskCreate", "TaskUpdate"}
+        )
+    return count
+
+
+def _open_task_state(value: str) -> str:
+    tasks = json.loads(value)
+    open_tasks = []
+    for item in tasks:
+        task = item.get("task", item)
+        if task.get("status") != "completed":
+            open_tasks.append(task)
+    if not open_tasks:
+        return ""
+    return json.dumps(open_tasks, ensure_ascii=False, indent=2)
+
+
 def _drop_missing(values: Mapping[str, Any]) -> dict[str, Any]:
     aliases = {
         "activeForm": "active_form",
@@ -265,5 +350,6 @@ __all__ = [
     "TaskListTool",
     "TaskService",
     "TaskUpdateTool",
+    "create_task_reminder_hook",
     "create_task_tools",
 ]

@@ -17,7 +17,12 @@ class TraceHandle:
     def __init__(self, run: Any | None = None) -> None:
         self._run = run
 
-    def end(self, *, outputs: dict[str, Any] | None = None) -> None:
+    def end(
+        self,
+        *,
+        outputs: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
         if self._run is None:
             return
 
@@ -26,11 +31,22 @@ class TraceHandle:
             return
 
         sanitized_outputs = sanitize_for_trace(outputs or {})
+        sanitized_error = (
+            str(sanitize_for_trace(error)) if error is not None else None
+        )
+        kwargs: dict[str, Any] = {"outputs": sanitized_outputs}
+        if sanitized_error is not None:
+            kwargs["error"] = sanitized_error
         try:
-            end(outputs=sanitized_outputs)
+            end(**kwargs)
         except TypeError:
             try:
-                end()
+                end(outputs=sanitized_outputs)
+            except TypeError:
+                try:
+                    end()
+                except Exception:
+                    return
             except Exception:
                 return
         except Exception:

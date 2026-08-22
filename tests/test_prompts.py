@@ -60,6 +60,7 @@ class PromptRuntimeTests(unittest.TestCase):
         )
 
         self.assertIn("Perform the work directly in this conversation", result.system_prompt)
+        self.assertIn("2 to 5 finishable phase tasks", result.system_prompt)
         self.assertNotIn("call todo_write before", result.system_prompt)
 
     def test_project_template_overrides_builtin_template(self) -> None:

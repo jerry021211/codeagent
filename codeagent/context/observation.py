@@ -13,16 +13,16 @@ from codeagent.messages import Message
 
 @dataclass(frozen=True, slots=True)
 class HistoryObservation:
-    """One comparison between the last sent history and the next one."""
-
     generation: int
     rewritten: bool
     rewrite_reason: str | None
+    generation_reason: str | None
     previous_message_count: int
     current_message_count: int
+    message_count_delta: int
     common_prefix_messages: int
-    discarded_prefix_messages: int
-    appended_messages: int
+    previous_suffix_messages: int
+    current_suffix_messages: int
     previous_history_hash: str | None
     current_history_hash: str
 
@@ -31,38 +31,59 @@ class HistoryObservation:
             "history_generation": self.generation,
             "history_rewritten": self.rewritten,
             "rewrite_reason": self.rewrite_reason,
+            "generation_reason": self.generation_reason,
             "previous_message_count": self.previous_message_count,
             "current_message_count": self.current_message_count,
+            "message_count_delta": self.message_count_delta,
             "common_prefix_messages": self.common_prefix_messages,
-            "discarded_prefix_messages": self.discarded_prefix_messages,
-            "appended_messages": self.appended_messages,
+            "previous_suffix_messages": self.previous_suffix_messages,
+            "current_suffix_messages": self.current_suffix_messages,
             "previous_history_hash": self.previous_history_hash,
             "current_history_hash": self.current_history_hash,
         }
 
 
 class HistoryObserver:
-    """Detect sent-prefix mutation without knowing how context is managed."""
+    """Compare consecutive histories sent to the main model."""
 
-    def __init__(self) -> None:
-        self._generation = 0
-        self._last_sent: list[Message] | None = None
+    def __init__(
+        self,
+        *,
+        generation: int = 0,
+        last_sent: list[Message] | None = None,
+    ) -> None:
+        self._generation = generation
+        self._last_sent = deepcopy(last_sent) if last_sent is not None else None
 
-    def observe(self, messages: list[Message]) -> HistoryObservation:
+    def restore(self, *, generation: int, last_sent: list[Message]) -> None:
+        self._generation = generation
+        self._last_sent = deepcopy(last_sent)
+
+    def observe(
+        self,
+        messages: list[Message],
+        *,
+        generation: int | None = None,
+        generation_reason: str | None = None,
+    ) -> HistoryObservation:
         current = deepcopy(messages)
         current_hash = _history_hash(current)
         previous = self._last_sent
 
         if previous is None:
+            if generation is not None:
+                self._generation = generation
             observation = HistoryObservation(
                 generation=self._generation,
                 rewritten=False,
                 rewrite_reason=None,
+                generation_reason=None,
                 previous_message_count=0,
                 current_message_count=len(current),
+                message_count_delta=len(current),
                 common_prefix_messages=0,
-                discarded_prefix_messages=0,
-                appended_messages=len(current),
+                previous_suffix_messages=0,
+                current_suffix_messages=len(current),
                 previous_history_hash=None,
                 current_history_hash=current_hash,
             )
@@ -71,22 +92,26 @@ class HistoryObserver:
 
         common_prefix = _common_prefix_length(previous, current)
         rewritten = common_prefix < len(previous)
+        applied_reason: str | None = None
         if rewritten:
-            self._generation += 1
+            if generation is not None and generation > self._generation:
+                self._generation = generation
+                applied_reason = generation_reason or "unexpected_prefix_change"
+            else:
+                self._generation += 1
+                applied_reason = "unexpected_prefix_change"
 
         observation = HistoryObservation(
             generation=self._generation,
             rewritten=rewritten,
-            rewrite_reason=(
-                _rewrite_reason(previous, current, common_prefix)
-                if rewritten
-                else None
-            ),
+            rewrite_reason=applied_reason,
+            generation_reason=applied_reason,
             previous_message_count=len(previous),
             current_message_count=len(current),
+            message_count_delta=len(current) - len(previous),
             common_prefix_messages=common_prefix,
-            discarded_prefix_messages=max(0, len(previous) - common_prefix),
-            appended_messages=max(0, len(current) - common_prefix),
+            previous_suffix_messages=max(0, len(previous) - common_prefix),
+            current_suffix_messages=max(0, len(current) - common_prefix),
             previous_history_hash=_history_hash(previous),
             current_history_hash=current_hash,
         )
@@ -101,18 +126,6 @@ def _common_prefix_length(previous: list[Message], current: list[Message]) -> in
             break
         length += 1
     return length
-
-
-def _rewrite_reason(
-    previous: list[Message],
-    current: list[Message],
-    common_prefix: int,
-) -> str:
-    if common_prefix == 0:
-        return "sent_history_replaced"
-    if len(current) < len(previous):
-        return "sent_history_shortened"
-    return "sent_prefix_changed"
 
 
 def _history_hash(messages: list[Message]) -> str:

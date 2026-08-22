@@ -15,6 +15,7 @@ from codeagent import (
 )
 from codeagent.tools import (
     TodoStore,
+    create_task_reminder_hook,
     create_todo_reminder_hook,
 )
 
@@ -200,6 +201,56 @@ class HookedAgentTests(unittest.TestCase):
         ]
 
         store.replace([{"content": "Plan the change", "status": "in_progress"}])
+
+        self.assertIsNone(hook(messages))
+
+    def test_task_reminder_nudges_stale_persistent_progress(self) -> None:
+        hook = create_task_reminder_hook(
+            lambda: '[{"id":"1","subject":"Review storage","status":"in_progress"}]',
+            interval=2,
+        )
+        messages = [{"role": "user", "content": "review tasks"}]
+
+        self.assertIsNone(hook(messages))
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "read_file", "input": {}}
+                ],
+            }
+        )
+        self.assertIsNone(hook(messages))
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "grep", "input": {}}
+                ],
+            }
+        )
+
+        reminder = hook(messages)
+
+        self.assertIsNotNone(reminder)
+        self.assertIn("Review storage", reminder)
+        self.assertIn("not been updated for 2 model calls", reminder)
+
+    def test_task_reminder_resets_after_task_update(self) -> None:
+        hook = create_task_reminder_hook(
+            lambda: '[{"id":"1","status":"in_progress"}]',
+            interval=1,
+        )
+        messages = [{"role": "user", "content": "review tasks"}]
+        self.assertIsNone(hook(messages))
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "TaskUpdate", "input": {}}
+                ],
+            }
+        )
 
         self.assertIsNone(hook(messages))
 

@@ -193,6 +193,8 @@ class EnvironmentConfigTests(unittest.TestCase):
                 "\n".join(
                     [
                         "MODEL_ID=from-dotenv",
+                        "SUMMARIZATION_MODEL_ID=summary-from-dotenv",
+                        "SUMMARIZATION_API_KEY=summary-key-from-dotenv",
                         "ANTHROPIC_API_KEY=dotenv-key",
                         "ANTHROPIC_BASE_URL=https://anthropic.test",
                         "STREAMING=true",

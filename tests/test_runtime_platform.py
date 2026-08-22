@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import unittest
 from pathlib import Path
@@ -67,7 +68,53 @@ class RuntimePlatformTests(unittest.TestCase):
             text=True,
             timeout=120,
             cwd=str(Path.cwd().resolve()),
+            env=run.call_args.kwargs["env"],
         )
+
+    def test_bash_tool_disables_tracing_in_child_processes_by_default(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="ok\n", stderr=""
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "LANGSMITH_TRACING": "true",
+                "LANGCHAIN_TRACING_V2": "true",
+            },
+            clear=True,
+        ):
+            with patch(
+                "codeagent.tools.bash.subprocess.run", return_value=completed
+            ) as run:
+                BashTool().run("show-version")
+
+            child_env = run.call_args.kwargs["env"]
+            self.assertEqual(child_env["LANGSMITH_TRACING"], "false")
+            self.assertEqual(child_env["LANGCHAIN_TRACING_V2"], "false")
+            self.assertEqual(os.environ["LANGSMITH_TRACING"], "true")
+            self.assertEqual(os.environ["LANGCHAIN_TRACING_V2"], "true")
+
+    def test_bash_tool_can_explicitly_propagate_tracing(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="ok\n", stderr=""
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "LANGSMITH_TRACING": "true",
+                "LANGCHAIN_TRACING_V2": "true",
+                "CODEAGENT_TRACE_SUBPROCESSES": "true",
+            },
+            clear=True,
+        ):
+            with patch(
+                "codeagent.tools.bash.subprocess.run", return_value=completed
+            ) as run:
+                BashTool().run("show-version")
+
+            child_env = run.call_args.kwargs["env"]
+            self.assertEqual(child_env["LANGSMITH_TRACING"], "true")
+            self.assertEqual(child_env["LANGCHAIN_TRACING_V2"], "true")
 
     def test_prompt_includes_detected_platform_and_command_style(self) -> None:
         detected = RuntimePlatform(

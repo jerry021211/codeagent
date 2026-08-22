@@ -75,8 +75,15 @@ class EnvironmentConfig:
     @classmethod
     def from_env(cls) -> "EnvironmentConfig":
         _load_dotenv()
+        model_id = _required_env("MODEL_ID")
+        context_mode = os.getenv("CONTEXT_COMPACT_MODE", "model")
+        summarization_model = (
+            _required_env("SUMMARIZATION_MODEL_ID")
+            if context_mode == "model"
+            else ""
+        )
         return cls(
-            model_id=_required_env("MODEL_ID"),
+            model_id=model_id,
             api_key=_first_optional_env("API_KEY", "ANTHROPIC_API_KEY"),
             base_url=_first_optional_env("BASE_URL", "ANTHROPIC_BASE_URL"),
             max_tokens=_int_env("MAX_TOKENS", 8000),
@@ -89,13 +96,9 @@ class EnvironmentConfig:
             enable_skills=_bool_env("ENABLE_SKILLS", True),
             skill_roots=_path_list_env("SKILLS_DIR", (Path(".skills"),)),
             context_config=ContextConfig(
-                mode=os.getenv("CONTEXT_COMPACT_MODE", "simple"),
-                max_messages=_int_env("CONTEXT_MAX_MESSAGES", 50),
-                keep_head_messages=_int_env("CONTEXT_KEEP_HEAD_MESSAGES", 3),
-                keep_tail_messages=_int_env("CONTEXT_KEEP_TAIL_MESSAGES", 47),
-                keep_recent_tool_results=_int_env(
-                    "CONTEXT_KEEP_RECENT_TOOL_RESULTS", 3
-                ),
+                mode=context_mode,
+                summarization_model=summarization_model,
+                summarization_api_key=_optional_env("SUMMARIZATION_API_KEY"),
                 tool_result_budget_chars=_int_env(
                     "CONTEXT_TOOL_RESULT_BUDGET_CHARS", 200_000
                 ),
@@ -116,7 +119,6 @@ class EnvironmentConfig:
                     )
                 ),
                 reactive_retries=_int_env("CONTEXT_REACTIVE_RETRIES", 1),
-                max_compact_failures=_int_env("CONTEXT_MAX_COMPACT_FAILURES", 3),
             ),
             memory_config=MemoryConfig(
                 enabled=_bool_env("ENABLE_MEMORY", True),
