@@ -146,9 +146,6 @@ class EnvironmentConfig:
                 skill_catalog_budget_chars=_int_env(
                     "SKILL_CATALOG_BUDGET_CHARS", 12_000
                 ),
-                context_summary_budget_chars=_int_env(
-                    "CONTEXT_SUMMARY_BUDGET_CHARS", 12_000
-                ),
                 emit_trace=_bool_env("PROMPT_TRACE", False),
             ),
             recovery_config=RecoveryConfig(

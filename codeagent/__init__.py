@@ -22,7 +22,6 @@ from codeagent.permissions import PermissionDecision, PermissionPolicy
 from codeagent.prompts import (
     PromptAssemblyResult,
     PromptConfig,
-    PromptFragment,
     PromptMode,
     PromptRuntime,
 )
@@ -59,7 +58,6 @@ __all__ = [
     "PlanningBackend",
     "PromptAssemblyResult",
     "PromptConfig",
-    "PromptFragment",
     "PromptMode",
     "PromptRuntime",
     "RecoveryAction",

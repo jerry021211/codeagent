@@ -230,8 +230,8 @@ Agent 不再在 `agent.py` 里硬编码 todo、subagent、skill、memory 等 pro
 
 ```text
 Agent 收集真实运行状态
--> PromptProvider 产出 PromptFragment
--> PromptAssembler 按 section、priority、budget 组装
+-> PromptRuntime 按固定顺序选择当前能力需要的模板
+-> 按 static/dynamic 分区和 budget 组装
 -> 返回 system prompt + trace/hash
 ```
 
@@ -267,7 +267,6 @@ SYSTEM_PROMPT_BUDGET_CHARS=120000
 SYSTEM_PROMPT_STATIC_BUDGET_CHARS=50000
 SYSTEM_PROMPT_DYNAMIC_BUDGET_CHARS=70000
 SKILL_CATALOG_BUDGET_CHARS=12000
-CONTEXT_SUMMARY_BUDGET_CHARS=12000
 PROMPT_TRACE=false
 ```
 

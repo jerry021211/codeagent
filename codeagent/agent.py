@@ -193,10 +193,7 @@ class Agent:
                     self.add_user_message(str(reminder)) #如果有加入提醒该做todolist了
 
                 tool_schemas = self.tools.schemas()
-                prompt_assembly = self._assemble_prompt(
-                    tool_schemas,
-                    model=recovery_state.current_model,
-                ) #组装system prompt
+                prompt_assembly = self._assemble_prompt(tool_schemas) #组装system prompt
                 self._log_prompt_assembly(prompt_assembly) #system prompt加入log
                 history_observation = self.history_observer.observe(
                     self.messages,
@@ -216,7 +213,6 @@ class Agent:
                     {
                         "prompt_hash": prompt_assembly.prompt_hash,
                         "chars": len(prompt_assembly.system_prompt),
-                        "assembly_reused": prompt_assembly.cache_hit,
                         **history_payload,
                         "fragments": [
                             {
@@ -588,7 +584,6 @@ class Agent:
         tool_schemas: list[dict[str, Any]],
         *,
         selected_memory_context: str = "",
-        model: str | None = None,
     ) -> PromptAssemblyResult:
         memory_catalog = self.memory_catalog
         if (
@@ -602,7 +597,6 @@ class Agent:
         return self.prompt_runtime.assemble(
             mode=self._prompt_mode(),
             base_system_prompt=self.config.system_prompt,
-            model=model or self.config.model,
             tool_schemas=tool_schemas,
             selected_memory_context=selected_memory_context,
             memory_catalog=memory_catalog,
@@ -616,10 +610,9 @@ class Agent:
         if self.prompt_log is None:
             return
         fragments = ", ".join(item.id for item in assembly.trace)
-        cache = " assembly_reused" if assembly.cache_hit else ""
         self.prompt_log(
             f"[prompt] hash={assembly.prompt_hash} chars={len(assembly.system_prompt)} "
-            f"fragments={len(assembly.trace)}{cache}: {fragments}"
+            f"fragments={len(assembly.trace)}: {fragments}"
         )
 
     def _compact_for_recovery_retry(

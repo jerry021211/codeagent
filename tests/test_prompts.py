@@ -14,7 +14,6 @@ class PromptRuntimeTests(unittest.TestCase):
         result = runtime.assemble(
             mode=PromptMode.NORMAL,
             base_system_prompt="base prompt",
-            model="fake-model",
             tool_schemas=[
                 {"name": "todo_write"},
                 {"name": "subagent"},
@@ -29,7 +28,31 @@ class PromptRuntimeTests(unittest.TestCase):
         self.assertIn("Available skills:", result.system_prompt)
         self.assertIn("SYSTEM_PROMPT_DYNAMIC_BOUNDARY", result.system_prompt)
         self.assertIn("Current workspace:", result.system_prompt)
-        self.assertFalse(result.reminder_messages)
+        self.assertEqual(
+            [item.id for item in result.trace],
+            [
+                "base.identity",
+                "base.execution",
+                "tools.available",
+                "tools.todo",
+                "tools.subagent",
+                "skills.catalog",
+                "runtime.reminder",
+            ],
+        )
+
+        repeated = runtime.assemble(
+            mode=PromptMode.NORMAL,
+            base_system_prompt="base prompt",
+            tool_schemas=[
+                {"name": "todo_write"},
+                {"name": "subagent"},
+                {"name": "load_skill"},
+            ],
+            skill_catalog="Available skills:\n- python-refactor: Refactor Python.",
+        )
+        self.assertEqual(repeated.system_prompt, result.system_prompt)
+        self.assertEqual(repeated.prompt_hash, result.prompt_hash)
 
     def test_subagent_mode_does_not_include_subagent_guidance(self) -> None:
         runtime = PromptRuntime(workspace=Path.cwd())
@@ -37,7 +60,6 @@ class PromptRuntimeTests(unittest.TestCase):
         result = runtime.assemble(
             mode=PromptMode.SUBAGENT,
             base_system_prompt="base prompt",
-            model="fake-model",
             tool_schemas=[{"name": "subagent"}, {"name": "read_file"}],
         )
 
@@ -50,7 +72,6 @@ class PromptRuntimeTests(unittest.TestCase):
         result = runtime.assemble(
             mode=PromptMode.NORMAL,
             base_system_prompt="base prompt",
-            model="fake-model",
             tool_schemas=[
                 {"name": "TaskCreate"},
                 {"name": "TaskGet"},
@@ -74,11 +95,23 @@ class PromptRuntimeTests(unittest.TestCase):
             result = runtime.assemble(
                 mode=PromptMode.NORMAL,
                 base_system_prompt="base prompt",
-                model="fake-model",
                 tool_schemas=[{"name": "todo_write"}],
             )
 
             self.assertIn("CUSTOM TODO TEMPLATE", result.system_prompt)
+
+    def test_selected_memory_replaces_memory_catalog(self) -> None:
+        result = PromptRuntime(workspace=Path.cwd()).assemble(
+            mode=PromptMode.NORMAL,
+            base_system_prompt="base prompt",
+            tool_schemas=[{"name": "load_memory"}],
+            selected_memory_context="selected memory",
+            memory_catalog="memory catalog",
+        )
+
+        self.assertIn("selected memory", result.system_prompt)
+        self.assertNotIn("memory catalog", result.system_prompt)
+        self.assertIn("memory.selected", [item.id for item in result.trace])
 
     def test_dynamic_budget_clips_low_priority_runtime_content(self) -> None:
         runtime = PromptRuntime(
@@ -89,7 +122,6 @@ class PromptRuntimeTests(unittest.TestCase):
         result = runtime.assemble(
             mode=PromptMode.NORMAL,
             base_system_prompt="base prompt",
-            model="fake-model",
             tool_schemas=[],
             selected_memory_context="x" * 1000,
         )
