@@ -22,6 +22,7 @@ class TaskService(Protocol):
         subject: str,
         description: str,
         active_form: str | None = None,
+        blocked_by: Sequence[str] | None = None,
         metadata: Mapping[str, Any] | None = None,
         conversation_id: str | None = None,
         run_id: str | None = None,
@@ -90,6 +91,11 @@ class TaskCreateTool:
                         "type": "string",
                         "description": "Short present-progress label shown while in progress.",
                     },
+                    "blockedBy": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "IDs of already-created prerequisite tasks.",
+                    },
                     "metadata": {"type": "object"},
                 },
                 "required": ["subject", "description"],
@@ -103,6 +109,7 @@ class TaskCreateTool:
         subject: str,
         description: str,
         activeForm: str | None = None,
+        blockedBy: Sequence[str] | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> str:
         resource = self.context.service.create_task(
@@ -110,6 +117,7 @@ class TaskCreateTool:
             subject=subject,
             description=description,
             active_form=activeForm,
+            blocked_by=blockedBy,
             metadata=metadata,
             conversation_id=self.context.conversation_id,
             run_id=self.context.run_id,

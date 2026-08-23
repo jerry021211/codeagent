@@ -60,14 +60,12 @@ class TaskSystemTests(unittest.TestCase):
             self.task_list_id, subject="First", description="First task"
         )
         second = self.repository.create_task(
-            self.task_list_id, subject="Second", description="Second task"
-        )
-        self.repository.update_task(
             self.task_list_id,
-            second.task.id,
-            changes={"add_blocked_by": [first.task.id]},
-            human_override=True,
+            subject="Second",
+            description="Second task",
+            blocked_by=[first.task.id],
         )
+        self.assertEqual(second.task.blocked_by, (first.task.id,))
 
         with self.assertRaises(StorageConflictError):
             self.repository.update_task(
@@ -156,6 +154,15 @@ class TaskSystemTests(unittest.TestCase):
             {"subject": "Tool task", "description": "Created through tool"},
         )
         self.assertIn('"id": "1"', created)
+        dependent = registry.execute(
+            "TaskCreate",
+            {
+                "subject": "Dependent task",
+                "description": "Wait for the first task",
+                "blockedBy": ["1"],
+            },
+        )
+        self.assertIn('"blockedBy": [\n    "1"', dependent)
 
     def test_planning_backend_defaults_and_agent_mutual_exclusion(self) -> None:
         self.assertEqual(

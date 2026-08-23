@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -8,8 +9,10 @@ from types import SimpleNamespace
 
 try:
     from fastapi.testclient import TestClient
+    from starlette.responses import StreamingResponse
 except ImportError:  # pragma: no cover - optional dependency in core-only installs
     TestClient = None  # type: ignore[assignment,misc]
+    StreamingResponse = None  # type: ignore[assignment,misc]
 
 from codeagent.events import RunEvent
 from codeagent.web.api import create_app
@@ -95,6 +98,29 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(body["workspace"], str(self.workspace.resolve()))
         self.assertEqual(body["max_tokens"], 4096)
         self.assertTrue(body["features"]["sse"])
+
+    def test_task_event_endpoint_returns_sse_stream(self) -> None:
+        created = self.client.post(
+            "/api/conversations",
+            json={"title": "Task stream", "workspace": str(self.workspace)},
+        ).json()
+        route = next(
+            route
+            for route in self.app.routes
+            if getattr(route, "path", "") == "/api/task-lists/{task_list_id}/events"
+        )
+
+        response = asyncio.run(
+            route.endpoint(
+                request=SimpleNamespace(),
+                task_list_id=created["active_task_list_id"],
+                after=0,
+                last_event_id=None,
+            )
+        )
+
+        self.assertIsInstance(response, StreamingResponse)
+        self.assertEqual(response.media_type, "text/event-stream")
 
     def test_conversation_crud_and_message_contract(self) -> None:
         created = self.client.post(
@@ -210,6 +236,17 @@ class WebApiTests(unittest.TestCase):
             {"id", "subject", "description", "activeForm", "owner", "status", "blocks", "blockedBy", "metadata"},
         )
 
+        dependent = self.client.post(
+            f"/api/task-lists/{task_list_id}/tasks",
+            json={
+                "subject": "Integrate API",
+                "description": "Integrate after the API is ready",
+                "blockedBy": ["1"],
+            },
+        )
+        self.assertEqual(dependent.status_code, 201)
+        self.assertEqual(dependent.json()["task"]["blockedBy"], ["1"])
+
         updated = self.client.patch(
             f"/api/task-lists/{task_list_id}/tasks/1",
             json={"expectedRevision": 1, "status": "in_progress", "owner": "human"},
@@ -224,7 +261,7 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(stale.status_code, 409)
 
         listing = self.client.get(f"/api/task-lists/{task_list_id}/tasks")
-        self.assertEqual(len(listing.json()), 1)
+        self.assertEqual(len(listing.json()), 2)
         activity = self.client.get(
             f"/api/task-lists/{task_list_id}/tasks/1/activity"
         )

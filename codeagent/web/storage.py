@@ -822,6 +822,7 @@ class SQLiteRepository:
         subject: str,
         description: str,
         active_form: str | None = None,
+        blocked_by: Sequence[str] | None = None,
         metadata: Mapping[str, Any] | None = None,
         conversation_id: str | None = None,
         run_id: str | None = None,
@@ -865,6 +866,17 @@ class SQLiteRepository:
                 WHERE id = ?
                 """,
                 (now, task_list_id),
+            )
+            self._apply_dependency_changes(
+                connection,
+                task_list_id,
+                task_id,
+                {
+                    "add_blocks": [],
+                    "add_blocked_by": [str(value) for value in blocked_by or ()],
+                    "remove_blocks": [],
+                    "remove_blocked_by": [],
+                },
             )
             self._insert_task_activity(
                 connection,

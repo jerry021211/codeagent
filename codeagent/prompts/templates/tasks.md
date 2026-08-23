@@ -9,8 +9,12 @@ Tasks track stage progress; keep detailed file findings and command output in th
 conversation and context checkpoint, not in task descriptions.
 
 - Call TaskList before creating tasks so you do not duplicate existing work.
+- Every TaskCreate call must include both subject and description.
 - Put context, requirements, and verifiable completion conditions in description.
-- Express real prerequisites with addBlocks or addBlockedBy.
+- Create prerequisite tasks first. When a later task depends on them, pass their IDs in
+  TaskCreate blockedBy. Use TaskUpdate addBlockedBy only when a dependency changes later.
+- Example: create task 1 first, then create task 2 with blockedBy: ["1"]. An integration
+  task that needs tasks 2 and 3 should use blockedBy: ["2", "3"].
 - Before starting a ready task, set it to in_progress; the harness assigns you as owner.
 - Work on at most one in_progress task at a time.
 - Perform the work directly in this conversation. When a phase is complete, update it

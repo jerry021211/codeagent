@@ -78,6 +78,7 @@ class CreateTaskRequest(ApiModel):
     subject: str = Field(min_length=1, max_length=500)
     description: str = Field(min_length=1, max_length=100_000)
     activeForm: str | None = Field(default=None, max_length=500)
+    blockedBy: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

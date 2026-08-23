@@ -419,6 +419,7 @@ def create_app(
                 subject=body.subject,
                 description=body.description,
                 active_form=body.activeForm,
+                blocked_by=body.blockedBy,
                 metadata=body.metadata,
             )
         )
@@ -505,6 +506,16 @@ def create_app(
                     )
                 if not events:
                     yield ": heartbeat\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.post(
         "/api/conversations/{conversation_id}/runs",
