@@ -142,7 +142,7 @@ class HookedAgentTests(unittest.TestCase):
         agent = Agent(
             client=OneToolCallClient("danger", {}),
             tools=tools,
-            config=AgentConfig(model="fake-model", system_prompt="test"),
+            config=AgentConfig(model="fake-model"),
             hooks=hooks,
         )
 
@@ -171,7 +171,7 @@ class HookedAgentTests(unittest.TestCase):
         agent = Agent(
             client=OneToolCallClient("echo", {}),
             tools=tools,
-            config=AgentConfig(model="fake-model", system_prompt="test"),
+            config=AgentConfig(model="fake-model"),
             hooks=hooks,
         )
 

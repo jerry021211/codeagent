@@ -176,7 +176,7 @@ class TaskSystemTests(unittest.TestCase):
             Agent(
                 client=object(),
                 tools=registry,
-                config=AgentConfig(model="fake", system_prompt="fake"),
+                config=AgentConfig(model="fake"),
             )
 
 

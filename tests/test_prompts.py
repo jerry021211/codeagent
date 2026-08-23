@@ -13,7 +13,6 @@ class PromptRuntimeTests(unittest.TestCase):
 
         result = runtime.assemble(
             mode=PromptMode.NORMAL,
-            base_system_prompt="base prompt",
             tool_schemas=[
                 {"name": "todo_write"},
                 {"name": "subagent"},
@@ -22,9 +21,12 @@ class PromptRuntimeTests(unittest.TestCase):
             skill_catalog="Available skills:\n- python-refactor: Refactor Python.",
         )
 
-        self.assertIn("base prompt", result.system_prompt)
+        self.assertIn("interactive coding agent", result.system_prompt)
         self.assertIn("call todo_write before", result.system_prompt)
         self.assertIn("Use the subagent tool", result.system_prompt)
+        self.assertIn("focused investigation", result.system_prompt)
+        self.assertIn("final integration", result.system_prompt)
+        self.assertIn("do not submit the same failed assignment", result.system_prompt)
         self.assertIn("Available skills:", result.system_prompt)
         self.assertIn("SYSTEM_PROMPT_DYNAMIC_BOUNDARY", result.system_prompt)
         self.assertIn("Current workspace:", result.system_prompt)
@@ -40,10 +42,10 @@ class PromptRuntimeTests(unittest.TestCase):
                 "runtime.reminder",
             ],
         )
+        self.assertEqual(result.trace[0].source, "templates/identity.md")
 
         repeated = runtime.assemble(
             mode=PromptMode.NORMAL,
-            base_system_prompt="base prompt",
             tool_schemas=[
                 {"name": "todo_write"},
                 {"name": "subagent"},
@@ -59,11 +61,12 @@ class PromptRuntimeTests(unittest.TestCase):
 
         result = runtime.assemble(
             mode=PromptMode.SUBAGENT,
-            base_system_prompt="base prompt",
             tool_schemas=[{"name": "subagent"}, {"name": "read_file"}],
         )
 
         self.assertIn("focused coding subagent", result.system_prompt)
+        self.assertIn("Edit files only when", result.system_prompt)
+        self.assertIn("## Outcome", result.system_prompt)
         self.assertNotIn("Use the subagent tool", result.system_prompt)
 
     def test_task_guidance_replaces_todo_guidance(self) -> None:
@@ -71,7 +74,6 @@ class PromptRuntimeTests(unittest.TestCase):
 
         result = runtime.assemble(
             mode=PromptMode.NORMAL,
-            base_system_prompt="base prompt",
             tool_schemas=[
                 {"name": "TaskCreate"},
                 {"name": "TaskGet"},
@@ -94,16 +96,31 @@ class PromptRuntimeTests(unittest.TestCase):
 
             result = runtime.assemble(
                 mode=PromptMode.NORMAL,
-                base_system_prompt="base prompt",
                 tool_schemas=[{"name": "todo_write"}],
             )
 
             self.assertIn("CUSTOM TODO TEMPLATE", result.system_prompt)
 
+    def test_project_identity_template_overrides_builtin_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            prompts = root / ".prompts"
+            prompts.mkdir()
+            (prompts / "identity.md").write_text(
+                "PROJECT CODING AGENT",
+                encoding="utf-8",
+            )
+
+            result = PromptRuntime(workspace=root).assemble(
+                mode=PromptMode.NORMAL,
+                tool_schemas=[],
+            )
+
+            self.assertTrue(result.system_prompt.startswith("PROJECT CODING AGENT"))
+
     def test_selected_memory_replaces_memory_catalog(self) -> None:
         result = PromptRuntime(workspace=Path.cwd()).assemble(
             mode=PromptMode.NORMAL,
-            base_system_prompt="base prompt",
             tool_schemas=[{"name": "load_memory"}],
             selected_memory_context="selected memory",
             memory_catalog="memory catalog",
@@ -121,7 +138,6 @@ class PromptRuntimeTests(unittest.TestCase):
 
         result = runtime.assemble(
             mode=PromptMode.NORMAL,
-            base_system_prompt="base prompt",
             tool_schemas=[],
             selected_memory_context="x" * 1000,
         )

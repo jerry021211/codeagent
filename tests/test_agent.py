@@ -9,7 +9,9 @@ from unittest.mock import patch
 from codeagent import (
     Agent,
     AgentConfig,
+    CallbackEventSink,
     EnvironmentConfig,
+    EventEmitter,
     HookManager,
     ModelResponse,
     RecoveryConfig,
@@ -49,10 +51,18 @@ class SequenceClient:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
+        self.fork_calls = []
 
     def create_message(self, **kwargs):
         self.calls.append(deepcopy(kwargs))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    def fork(self, **kwargs):
+        self.fork_calls.append(dict(kwargs))
+        return self
 
 
 class AgentTests(unittest.TestCase):
@@ -74,7 +84,7 @@ class AgentTests(unittest.TestCase):
         agent = Agent(
             client=FakeClient(),
             tools=tools,
-            config=AgentConfig(model="fake-model", system_prompt="test"),
+            config=AgentConfig(model="fake-model"),
         )
         result = agent.run("say hello")
 
@@ -126,18 +136,24 @@ class AgentTests(unittest.TestCase):
         agent = Agent(
             client=client,
             tools=tools,
-            config=AgentConfig(model="fake-model", system_prompt="test"),
+            config=AgentConfig(model="fake-model"),
         )
 
         result = agent.run("delegate this")
 
         self.assertEqual(result.final_text, "parent final")
+        self.assertEqual(agent.subagent_max_iterations, 30)
+        subagent_fork = next(
+            call for call in client.fork_calls if call.get("call_kind") == "subagent"
+        )
+        self.assertTrue(subagent_fork["stream"])
         self.assertEqual(
             client.calls[1]["messages"][0],
             {"role": "user", "content": "inspect the project"},
         )
         self.assertEqual(len(client.calls[1]["messages"]), 1)
         self.assertIn("Current workspace:", client.calls[1]["system"])
+        self.assertIn("## Outcome", client.calls[1]["system"])
         subagent_tool_names = {tool["name"] for tool in client.calls[1]["tools"]}
         self.assertIn("echo", subagent_tool_names)
         self.assertNotIn("subagent", subagent_tool_names)
@@ -149,6 +165,53 @@ class AgentTests(unittest.TestCase):
                 "content": "subagent conclusion",
             },
         )
+
+    def test_subagent_failure_is_reported_once_and_not_completed(self) -> None:
+        error = ValueError(
+            "Streaming is required for operations that may take longer than 10 minutes."
+        )
+        client = SequenceClient(
+            [
+                ModelResponse(
+                    stop_reason="tool_use",
+                    content=[
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_parent",
+                            "name": "subagent",
+                            "input": {"description": "implement the backend"},
+                        }
+                    ],
+                ),
+                error,
+                ModelResponse(
+                    stop_reason="end_turn",
+                    content=[{"type": "text", "text": "parent handled failure"}],
+                ),
+            ]
+        )
+        events = []
+        agent = Agent(
+            client=client,
+            tools=ToolRegistry(),
+            config=AgentConfig(model="fake-model"),
+            recovery_runtime=RecoveryRuntime(
+                RecoveryConfig(max_retries=10, sleep_enabled=False)
+            ),
+            event_emitter=EventEmitter(CallbackEventSink(events.append)),
+        )
+
+        result = agent.run("delegate this")
+
+        self.assertEqual(result.final_text, "parent handled failure")
+        self.assertEqual(len(client.calls), 3)
+        tool_result = agent.messages[2]["content"][0]["content"]
+        self.assertTrue(tool_result.startswith("Error: Subagent failed"))
+        child_events = [
+            event.type for event in events if event.parent_agent_id == "agent_root"
+        ]
+        self.assertIn("subagent.failed", child_events)
+        self.assertNotIn("subagent.completed", child_events)
 
     def test_subagent_logs_enter_and_exit_markers(self) -> None:
         client = SequenceClient(
@@ -178,7 +241,7 @@ class AgentTests(unittest.TestCase):
         agent = Agent(
             client=client,
             tools=ToolRegistry(),
-            config=AgentConfig(model="fake-model", system_prompt="test"),
+            config=AgentConfig(model="fake-model"),
             subagent_log=markers.append,
         )
 
@@ -208,12 +271,12 @@ class AgentTests(unittest.TestCase):
         agent = Agent(
             client=client,
             tools=ToolRegistry(),
-            config=AgentConfig(model="fake-model", system_prompt="base prompt"),
+            config=AgentConfig(model="fake-model"),
         )
 
         agent.run("do work")
 
-        self.assertIn("base prompt", client.system_prompt)
+        self.assertIn("interactive coding agent", client.system_prompt)
         self.assertIn("Use the subagent tool", client.system_prompt)
 
     def test_agent_injects_before_model_call_reminders(self) -> None:
@@ -229,7 +292,7 @@ class AgentTests(unittest.TestCase):
         agent = Agent(
             client=EndTurnClient(),
             tools=ToolRegistry(),
-            config=AgentConfig(model="fake-model", system_prompt="test"),
+            config=AgentConfig(model="fake-model"),
             hooks=hooks,
         )
 
@@ -255,12 +318,12 @@ class AgentTests(unittest.TestCase):
         agent = Agent(
             client=client,
             tools=tools,
-            config=AgentConfig(model="fake-model", system_prompt="base prompt"),
+            config=AgentConfig(model="fake-model"),
         )
 
         agent.run("do work")
 
-        self.assertIn("base prompt", client.system_prompt)
+        self.assertIn("interactive coding agent", client.system_prompt)
         self.assertIn("call todo_write before", client.system_prompt)
 
     def test_agent_adds_skill_catalog_when_available(self) -> None:
@@ -279,7 +342,7 @@ class AgentTests(unittest.TestCase):
         agent = Agent(
             client=client,
             tools=ToolRegistry(),
-            config=AgentConfig(model="fake-model", system_prompt="base prompt"),
+            config=AgentConfig(model="fake-model"),
             skill_catalog="Available skills:\n- python-refactor: Refactor Python.",
         )
 
@@ -308,7 +371,7 @@ class AgentTests(unittest.TestCase):
         agent = Agent(
             client=client,
             tools=tools,
-            config=AgentConfig(model="fake-model", system_prompt="base prompt"),
+            config=AgentConfig(model="fake-model"),
             memory_catalog=(
                 "Available memories:\n"
                 "- Project Style [project]: Explain call chains first."
@@ -359,7 +422,7 @@ class AgentTests(unittest.TestCase):
             agent = Agent(
                 client=client,
                 tools=ToolRegistry(),
-                config=AgentConfig(model="deepseek-v4-pro", system_prompt="base prompt"),
+                config=AgentConfig(model="deepseek-v4-pro"),
                 memory_manager=manager,
                 memory_catalog=manager.catalog_prompt(),
             )
@@ -432,7 +495,7 @@ class AgentTests(unittest.TestCase):
             agent = Agent(
                 client=client,
                 tools=tools,
-                config=AgentConfig(model="deepseek-v4-pro", system_prompt="base"),
+                config=AgentConfig(model="deepseek-v4-pro"),
                 memory_manager=MemoryManager(
                     store,
                     MemoryConfig(selection_mode="llm"),
@@ -466,7 +529,6 @@ class AgentTests(unittest.TestCase):
             tools=ToolRegistry(),
             config=AgentConfig(
                 model="fake-model",
-                system_prompt="test",
                 max_tokens=100,
             ),
             recovery_runtime=RecoveryRuntime(
@@ -490,7 +552,6 @@ class AgentTests(unittest.TestCase):
                 "BASE_URL": "https://example.test",
                 "MAX_TOKENS": "1234",
                 "MAX_ITERATIONS": "7",
-                "SYSTEM_PROMPT": "custom prompt",
                 "ENABLE_SKILLS": "false",
                 "SKILLS_DIR": "project-skills",
                 "CONTEXT_COMPACT_MODE": "model",
@@ -518,7 +579,6 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(env.base_url, "https://example.test")
         self.assertEqual(env.to_agent_config().max_tokens, 1234)
         self.assertEqual(env.to_agent_config().max_iterations, 7)
-        self.assertEqual(env.to_agent_config().system_prompt, "custom prompt")
         self.assertFalse(env.enable_skills)
         self.assertEqual([str(path) for path in env.skill_roots], ["project-skills"])
         self.assertEqual(env.context_config.mode, "model")

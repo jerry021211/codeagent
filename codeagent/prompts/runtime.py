@@ -44,7 +44,6 @@ class PromptRuntime:
         self,
         *,
         mode: PromptMode,
-        base_system_prompt: str,
         tool_schemas: list[dict],
         selected_memory_context: str = "",
         memory_catalog: str = "",
@@ -52,7 +51,6 @@ class PromptRuntime:
     ) -> PromptAssemblyResult:
         fragments = self._build_fragments(
             mode=mode,
-            base_system_prompt=base_system_prompt,
             tool_schemas=tool_schemas,
             selected_memory_context=selected_memory_context,
             memory_catalog=memory_catalog,
@@ -74,7 +72,6 @@ class PromptRuntime:
         self,
         *,
         mode: PromptMode,
-        base_system_prompt: str,
         tool_schemas: list[dict],
         selected_memory_context: str,
         memory_catalog: str,
@@ -88,8 +85,8 @@ class PromptRuntime:
             identity = self._load_template("subagent")
             identity_source = "templates/subagent.md"
         else:
-            identity = base_system_prompt.strip() or self._load_template("identity")
-            identity_source = "config.system_prompt"
+            identity = self._load_template("identity")
+            identity_source = "templates/identity.md"
         self._add(
             fragments,
             "base.identity",

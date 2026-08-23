@@ -90,7 +90,6 @@ MAX_TOKENS=8000
 MAX_ITERATIONS=50
 STREAMING=false
 CODEAGENT_PLANNING_MODE=auto
-SYSTEM_PROMPT=You are a coding agent. Use tools to solve tasks.
 ```
 
 代码里可通过 `EnvironmentConfig.from_env()` 构建运行配置：
@@ -187,15 +186,19 @@ Web 右侧“任务”页可查看 Ready、Blocked、进行中和已完成任务
 Agent 会创建一个新的子 Agent：
 
 - 子 Agent 使用全新的 `messages` 列表，只包含父 Agent 传入的子任务描述。
-- 子 Agent 跑自己的 agent loop，可继续调用读文件、搜索、bash、写入、编辑、
-  `todo_write` 等工具。
+- 子 Agent 跑自己的 agent loop，可承担独立且边界清晰的调查、实现、修复、重构或验证，
+  并继续调用读文件、搜索、bash、写入、编辑、`todo_write` 等工具。
 - 子 Agent 的工具表会移除 `subagent`，避免递归生成子 Agent。
 - 父 Agent 的上下文只收到子 Agent 的最终文本结论，不接收其中间消息和工具历史。
+- 子任务描述只有明确要求修改代码时，子 Agent 才会编辑文件。
+- 父 Agent 负责持久化 Task 状态、最终集成和验证，不把整个模糊目标交给子 Agent。
+- 子 Agent 内部使用流式模型请求；失败会作为失败事件和 `Error:` 工具结果返回，
+  父 Agent 不应原样重复提交同一个失败任务。
 
 CLI 默认会给子 Agent 创建独立的 `TodoStore`、默认工具池和默认 hooks；权限检查
 仍通过 hooks 执行，因此子 Agent 不会绕过权限策略。代码中如需自定义子 Agent
-环境，可在构造 `Agent` 时传入 `subagent_environment_factory`。如需手动组装工具
-池，也可以调用 `create_default_registry(subagent_spawn_fn=...)` 显式加入 `SubagentTool`。
+环境，可在构造 `Agent` 时传入 `subagent_environment_factory`，固定返回子 Agent 的
+`ToolRegistry`、`HookManager` 和 `ContextManager`。
 
 CLI 会在进入和退出子 Agent 时输出显式标志：
 
@@ -252,6 +255,9 @@ System prompt 的顺序是：
 ```text
 codeagent/prompts/templates/
 ```
+
+普通 Agent 的身份提示只维护在 `templates/identity.md`；子 Agent 使用
+`templates/subagent.md`。不再通过 `SYSTEM_PROMPT` 环境变量重复配置身份提示。
 
 项目可以用 `.prompts/*.md` 覆盖内置模板，例如：
 

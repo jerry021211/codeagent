@@ -12,22 +12,29 @@ SUBAGENT_TOOL_NAME = "subagent"
 
 @dataclass(slots=True)
 class SubagentTool:
-    """Delegate focused work to a caller-provided subagent runner."""
+    """Delegate one independent coding work unit to a child agent."""
 
     spawn_fn: Callable[[str], str]
     definition: ToolDefinition = field(
         default=ToolDefinition(
             name=SUBAGENT_TOOL_NAME,
             description=(
-                "Launch a subagent to handle a focused subtask with a fresh "
-                "message list. Returns only the subagent's final conclusion."
+                "Delegate one independent, bounded coding work unit that needs "
+                "multiple tool calls. Suitable for focused investigation, "
+                "implementation, bug fixing, refactoring, or validation. The "
+                "subagent has fresh context and returns only its final report."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "description": {
                         "type": "string",
-                        "description": "Clear, self-contained task for the subagent.",
+                        "description": (
+                            "Self-contained assignment stating the action, goal, "
+                            "exact scope, constraints, completion conditions, and "
+                            "validation. Explicitly request code changes when the "
+                            "subagent should edit files."
+                        ),
                     }
                 },
                 "required": ["description"],

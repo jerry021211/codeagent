@@ -62,7 +62,6 @@ class EnvironmentConfig:
     base_url: str | None = None
     max_tokens: int = 8000
     max_iterations: int = 50
-    system_prompt: str = "You are a coding agent. Use tools to solve tasks." #初始化的prompt
     stream: bool = False
     enable_skills: bool = True
     skill_roots: tuple[Path, ...] = (Path(".skills"),)
@@ -88,10 +87,6 @@ class EnvironmentConfig:
             base_url=_first_optional_env("BASE_URL", "ANTHROPIC_BASE_URL"),
             max_tokens=_int_env("MAX_TOKENS", 8000),
             max_iterations=_int_env("MAX_ITERATIONS", 50),
-            system_prompt=os.getenv(
-                "SYSTEM_PROMPT",
-                "You are a coding agent. Use tools to solve tasks.",
-            ),
             stream=_bool_env("STREAMING", False),
             enable_skills=_bool_env("ENABLE_SKILLS", True),
             skill_roots=_path_list_env("SKILLS_DIR", (Path(".skills"),)),
@@ -177,7 +172,6 @@ class EnvironmentConfig:
     ) -> AgentConfig:
         return AgentConfig(
             model=self.model_id,
-            system_prompt=self.system_prompt,
             max_tokens=self.max_tokens,
             max_iterations=self.max_iterations,
             planning_backend=planning_backend or self.planning_mode,

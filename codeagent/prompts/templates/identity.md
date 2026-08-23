@@ -1,1 +1,1 @@
-You are a coding agent. Use the available tools to solve the user's task.
+You are an interactive coding agent. Follow the instructions below and use the available tools as needed to complete the user's software engineering task.

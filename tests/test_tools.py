@@ -52,18 +52,6 @@ class DefaultToolTests(unittest.TestCase):
         self.assertEqual(calls, ["inspect the repository"])
         self.assertEqual(tool.definition.name, SUBAGENT_TOOL_NAME)
 
-    def test_default_registry_can_include_subagent_with_spawn_function(self) -> None:
-        registry = create_default_registry(
-            subagent_spawn_fn=lambda description: "summary"
-        )
-        schemas = {schema["name"]: schema for schema in registry.schemas()}
-
-        self.assertIn(SUBAGENT_TOOL_NAME, schemas)
-        self.assertEqual(
-            registry.execute(SUBAGENT_TOOL_NAME, {"description": "delegate"}),
-            "summary",
-        )
-
     def test_default_registry_can_include_load_skill_with_loader(self) -> None:
         loader = SkillLoader(roots=[])
 

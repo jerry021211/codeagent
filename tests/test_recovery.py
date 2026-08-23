@@ -39,6 +39,10 @@ class RecoveryClassifierTests(unittest.TestCase):
             classify_exception(TimeoutError("timed out")),
             RecoveryReason.TRANSIENT_RETRY,
         )
+        self.assertEqual(
+            classify_exception(ValueError("Streaming is required for long requests")),
+            RecoveryReason.NON_RETRYABLE_ERROR,
+        )
 
 
 class RecoveryRuntimeTests(unittest.TestCase):

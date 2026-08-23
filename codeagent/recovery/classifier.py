@@ -20,6 +20,8 @@ def classify_exception(exc: Exception) -> RecoveryReason:
         return RecoveryReason.RATE_LIMIT_RETRY
     if status == 529 or "overload" in text or "overloaded" in text:
         return RecoveryReason.OVERLOADED_RETRY
+    if "streaming is required" in text:
+        return RecoveryReason.NON_RETRYABLE_ERROR
     if status in {401, 403} or _has_any(text, ("unauthorized", "forbidden", "api key")):
         return RecoveryReason.NON_RETRYABLE_ERROR
     if status in {400, 404, 422} or _has_any(

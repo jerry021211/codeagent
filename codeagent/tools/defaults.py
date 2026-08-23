@@ -17,7 +17,6 @@ from codeagent.tools.memory import LoadMemoryTool, RememberTool, SearchMemoryToo
 from codeagent.tools.read import ReadFileTool
 from codeagent.tools.registry import ToolRegistry
 from codeagent.tools.skill import LoadSkillTool
-from codeagent.tools.subagent import SubagentTool
 from codeagent.tools.tasks import TaskService, create_task_tools
 from codeagent.tools.todo import TodoStore, TodoWriteTool
 from codeagent.tools.write import WriteFileTool
@@ -33,7 +32,6 @@ def default_tools(
     allow_memory_write: bool = True,
     memory_max_items: int = 5,
     compact_fn: Callable[[], str] | None = None,
-    subagent_spawn_fn: Callable[[str], str] | None = None,
     workspace_guard: WorkspaceGuard | None = None,
     changed_files: set[str] | None = None,
     planning_backend: PlanningBackend | str = PlanningBackend.TODO,
@@ -84,8 +82,6 @@ def default_tools(
             tools.append(RememberTool(store=memory_store))
     if compact_fn is not None:
         tools.append(CompactTool(compact_fn=compact_fn))
-    if subagent_spawn_fn is not None:
-        tools.append(SubagentTool(spawn_fn=subagent_spawn_fn))
     return tools
 
 
@@ -98,7 +94,6 @@ def create_default_registry(
     allow_memory_write: bool = True,
     memory_max_items: int = 5,
     compact_fn: Callable[[], str] | None = None,
-    subagent_spawn_fn: Callable[[str], str] | None = None,
     workspace_guard: WorkspaceGuard | None = None,
     changed_files: set[str] | None = None,
     planning_backend: PlanningBackend | str = PlanningBackend.TODO,
@@ -117,7 +112,6 @@ def create_default_registry(
         allow_memory_write=allow_memory_write,
         memory_max_items=memory_max_items,
         compact_fn=compact_fn,
-        subagent_spawn_fn=subagent_spawn_fn,
         workspace_guard=workspace_guard,
         changed_files=changed_files,
         planning_backend=planning_backend,

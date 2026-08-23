@@ -128,7 +128,6 @@ class RuntimePlatformTests(unittest.TestCase):
 
         result = runtime.assemble(
             mode=PromptMode.NORMAL,
-            base_system_prompt="base prompt",
             tool_schemas=[{"name": "bash"}],
         )
         system_prompt = result.system_prompt

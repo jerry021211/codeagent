@@ -83,7 +83,7 @@ class HistoryObserverTests(unittest.TestCase):
             client=SequenceClient(),
             tools=tools,
             config=AgentConfig(
-                model="fake-model", system_prompt="test", max_iterations=31
+                model="fake-model", max_iterations=31
             ),
             context=ContextManager(
                 config=ContextConfig(

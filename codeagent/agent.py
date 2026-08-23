@@ -32,17 +32,14 @@ from codeagent.tools import (
     ToolRegistry,
 )
 
-SubagentEnvironment = (
-    tuple[ToolRegistry, HookManager]
-    | tuple[ToolRegistry, HookManager, ContextManager]
-)
+SubagentEnvironment = tuple[ToolRegistry, HookManager, ContextManager]
+
 
 @dataclass(slots=True)
 class AgentConfig:
     """Runtime settings for one agent instance."""
 
     model: str
-    system_prompt: str
     max_tokens: int = 8000
     max_iterations: int = 50
     planning_backend: PlanningBackend = PlanningBackend.TODO
@@ -82,7 +79,6 @@ class Agent:
     messages: list[Message] = field(default_factory=list)
     allow_subagents: bool = True
     subagent_max_iterations: int = 30
-    subagent_registry_factory: Callable[[], ToolRegistry] | None = None
     subagent_environment_factory: Callable[[], SubagentEnvironment] | None = None
     subagent_log: Callable[[str], None] | None = None
     skill_catalog: str = ""
@@ -450,7 +446,7 @@ class Agent:
         return "[Compacted. History will be summarized before the next model call.]"
 
     def _spawn_subagent(self, description: str) -> str:
-        task_description = str(description or "").strip()
+        task_description = description.strip()
         if not task_description:
             return "Error: subagent description is required."
 
@@ -468,38 +464,34 @@ class Agent:
                     "max_iterations": self.subagent_max_iterations,
                 },
             ) as subagent_trace:
-                sub_tools, sub_hooks, sub_context = self._subagent_environment()
-                subagent = Agent(
-                    client=self._subagent_client(child_emitter),
-                    tools=sub_tools,
-                    config=AgentConfig(
-                        model=self.config.model,
-                        system_prompt=self.config.system_prompt,
-                        max_tokens=self.config.max_tokens,
-                        max_iterations=self.subagent_max_iterations,
-                    ),
-                    hooks=sub_hooks,
-                    context=sub_context,
-                    memory_manager=None,
-                    prompt_runtime=self.prompt_runtime,
-                    prompt_log=self.prompt_log,
-                    recovery_runtime=self.recovery_runtime,
-                    event_emitter=child_emitter,
-                    usage_tracker=self.usage_tracker,
-                    cancellation=self.cancellation,
-                    allow_subagents=False,
-                    subagent_log=self.subagent_log,
-                    skill_catalog=self.skill_catalog,
-                    memory_catalog=self.memory_catalog,
-                )
+                subagent = self._create_subagent(child_emitter)
                 result = subagent.run(task_description)
-                if result.final_text:
-                    output = result.final_text
-                else:
-                    output = (
-                        "Subagent stopped without a final conclusion "
-                        f"({result.stop_reason}, {result.iterations} iterations)."
+                output = result.final_text or (
+                    "Subagent stopped without a final conclusion "
+                    f"({result.stop_reason}, {result.iterations} iterations)."
+                )
+                if result.stop_reason.startswith(
+                    ("recovery_failed:", "max_iterations:")
+                ):
+                    error = f"Error: Subagent failed ({result.stop_reason}): {output}"
+                    subagent_trace.end(
+                        outputs={
+                            "result": output,
+                            "stop_reason": result.stop_reason,
+                            "iterations": result.iterations,
+                        },
+                        error=error,
                     )
+                    child_emitter.emit(
+                        "subagent.failed",
+                        {
+                            "description": task_description,
+                            "stop_reason": result.stop_reason,
+                            "iterations": result.iterations,
+                            "error": output,
+                        },
+                    )
+                    return error
                 subagent_trace.end(
                     outputs={
                         "result": output,
@@ -534,39 +526,44 @@ class Agent:
         if self.subagent_log is not None:
             self.subagent_log(message)
 
-    def _subagent_client(self, emitter: EventEmitter) -> Any:
-        fork = getattr(self.client, "fork", None)
-        if callable(fork):
-            return fork(
-                stream=False,
+    def _create_subagent(self, emitter: EventEmitter) -> Agent:
+        tools, hooks, context = self._subagent_environment()
+        return Agent(
+            client=self.client.fork(
+                stream=True,
                 on_text=None,
                 event_emitter=emitter,
                 usage_tracker=self.usage_tracker,
                 call_kind="subagent",
-            )
-        return self.client
+            ),
+            tools=tools,
+            config=AgentConfig(
+                model=self.config.model,
+                max_tokens=self.config.max_tokens,
+                max_iterations=self.subagent_max_iterations,
+            ),
+            hooks=hooks,
+            context=context,
+            prompt_runtime=self.prompt_runtime,
+            prompt_log=self.prompt_log,
+            recovery_runtime=self.recovery_runtime,
+            event_emitter=emitter,
+            usage_tracker=self.usage_tracker,
+            cancellation=self.cancellation,
+            allow_subagents=False,
+            skill_catalog=self.skill_catalog,
+            memory_catalog=self.memory_catalog,
+        )
 
-    def _subagent_tools(self) -> ToolRegistry:
-        if self.subagent_registry_factory is not None:
-            registry = self.subagent_registry_factory()
-            if SUBAGENT_TOOL_NAME in registry:
-                return registry.copy_without({SUBAGENT_TOOL_NAME})
-            return registry
-        return self.tools.copy_without({SUBAGENT_TOOL_NAME})
-
-    def _subagent_environment(self) -> tuple[ToolRegistry, HookManager, ContextManager]:
+    def _subagent_environment(self) -> SubagentEnvironment:
         if self.subagent_environment_factory is not None:
-            environment = self.subagent_environment_factory()
-            registry, hooks = environment[0], environment[1]
-            context = (
-                environment[2]
-                if len(environment) > 2
-                else ContextManager(config=self.context.config)
-            )
-            if SUBAGENT_TOOL_NAME in registry:
-                registry = registry.copy_without({SUBAGENT_TOOL_NAME})
-            return registry, hooks, context
-        return self._subagent_tools(), self.hooks, ContextManager(config=self.context.config)
+            tools, hooks, context = self.subagent_environment_factory()
+            return tools.copy_without({SUBAGENT_TOOL_NAME}), hooks, context
+        return (
+            self.tools.copy_without({SUBAGENT_TOOL_NAME}),
+            self.hooks,
+            ContextManager(config=self.context.config),
+        )
 
     def _system_prompt(
         self,
@@ -596,7 +593,6 @@ class Agent:
         assert self.prompt_runtime is not None
         return self.prompt_runtime.assemble(
             mode=self._prompt_mode(),
-            base_system_prompt=self.config.system_prompt,
             tool_schemas=tool_schemas,
             selected_memory_context=selected_memory_context,
             memory_catalog=memory_catalog,
