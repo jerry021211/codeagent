@@ -7,7 +7,6 @@ import type { ApprovalDecision, Conversation, Message, TaskResource } from "@/ty
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import { ChatWorkspace } from "@/components/ChatWorkspace";
 import { InspectorPanel } from "@/components/InspectorPanel";
-import { ApprovalBanner } from "@/components/ApprovalBanner";
 import { WorkspacePicker } from "@/components/WorkspacePicker";
 import { useRunEvents } from "@/hooks/useRunEvents";
 import { useRunStore } from "@/store/runStore";
@@ -249,8 +248,7 @@ export default function App() {
         </div>
 
         <div className="relative flex min-h-0 min-w-0 flex-col">
-          <ChatWorkspace title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sendRun.isPending} cancelling={cancelRun.isPending} runtimeModel={runtimeQuery.data?.model} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onToggleTheme={cycleTheme} />
-          {pendingApproval && runId && <div className="pointer-events-none absolute inset-x-0 bottom-[112px] z-20 sm:bottom-[124px]"><div className="pointer-events-auto"><ApprovalBanner approval={pendingApproval} busy={decideApproval.isPending} onDecision={(decision) => decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} /></div></div>}
+          <ChatWorkspace title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sendRun.isPending} cancelling={cancelRun.isPending} approval={pendingApproval} approvalBusy={decideApproval.isPending} runtimeModel={runtimeQuery.data?.model} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onToggleTheme={cycleTheme} />
         </div>
 
         <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || bindTaskList.isPending || promoteTaskList.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} taskLists={taskListsQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} onSelectTaskList={(id) => bindTaskList.mutate(id)} onPromoteTaskList={() => promoteTaskList.mutate()} /></div>

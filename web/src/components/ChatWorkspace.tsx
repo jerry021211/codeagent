@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { Bot, CircleStop, Menu, Monitor, Moon, PanelRight, Send, Sparkles, Square, Sun, Wifi, WifiOff } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Message, RunStatus } from "@/types/api";
+import type { Approval, ApprovalDecision, Message, RunStatus } from "@/types/api";
 import type { RunViewState } from "@/store/runStore";
 import { cx, formatTime, isRunActive, statusLabel } from "@/lib/utils";
 import { ActionCard } from "@/components/ActionCard";
+import { ApprovalBanner } from "@/components/ApprovalBanner";
 import { EmptyPanel, IconButton, Spinner, StatusDot } from "@/components/ui";
 import { RunTimeline } from "@/components/RunTimeline";
 
@@ -17,12 +18,15 @@ type Props = {
   draft: string;
   sending?: boolean;
   cancelling?: boolean;
+  approval?: Approval;
+  approvalBusy?: boolean;
   runtimeModel?: string | null;
   workspace?: string;
   theme: "system" | "light" | "dark";
   onDraft: (value: string) => void;
   onSend: () => void;
   onCancel: () => void;
+  onApprovalDecision: (decision: ApprovalDecision) => void;
   onOpenLeft: () => void;
   onOpenRight: () => void;
   onToggleTheme: () => void;
@@ -125,7 +129,15 @@ export function ChatWorkspace(props: Props) {
         {!following && (
           <button type="button" onClick={() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" })} className="mx-auto mb-2 block rounded-full border border-line bg-surface px-3 py-1 text-[10px] text-ink-muted shadow-sm hover:text-ink">回到最新消息</button>
         )}
-        <div className="mx-auto max-w-4xl rounded-2xl border border-line-strong bg-surface p-2 shadow-panel transition focus-within:border-accent/35 focus-within:ring-4 focus-within:ring-accent/[0.06]">
+        <div className="mx-auto max-w-4xl space-y-2">
+          {props.approval && (
+            <ApprovalBanner
+              approval={props.approval}
+              busy={props.approvalBusy}
+              onDecision={props.onApprovalDecision}
+            />
+          )}
+          <div className="rounded-2xl border border-line-strong bg-surface p-2 shadow-panel transition focus-within:border-accent/35 focus-within:ring-4 focus-within:ring-accent/[0.06]">
           <textarea
             ref={inputRef}
             value={props.draft}
@@ -149,6 +161,7 @@ export function ChatWorkspace(props: Props) {
                 <span className="sr-only">发送</span>
               </button>
             )}
+          </div>
           </div>
         </div>
         {props.run?.status === "cancelling" && <div className="mt-2 flex items-center justify-center gap-1.5 text-[10px] text-ink-muted"><CircleStop className="size-3" /> 取消将在当前安全边界生效</div>}
