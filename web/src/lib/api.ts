@@ -82,12 +82,6 @@ export const api = {
     );
   },
 
-  async listTaskLists(workspace: string) {
-    return unwrapList(
-      await request<ApiList<TaskList>>(`/task-lists?workspace=${encodeURIComponent(workspace)}`),
-    );
-  },
-
   getTaskList(taskListId: string) {
     return request<TaskList>(`/task-lists/${encodeURIComponent(taskListId)}`);
   },
@@ -109,19 +103,6 @@ export const api = {
     return request<TaskResource>(`/task-lists/${encodeURIComponent(taskListId)}/tasks/${encodeURIComponent(taskId)}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
-    });
-  },
-
-  promoteTaskList(taskListId: string) {
-    return request<TaskList>(`/task-lists/${encodeURIComponent(taskListId)}/promote`, {
-      method: "POST",
-    });
-  },
-
-  bindTaskList(conversationId: string, taskListId: string) {
-    return request<Conversation>(`/conversations/${encodeURIComponent(conversationId)}/task-list`, {
-      method: "POST",
-      body: JSON.stringify({ taskListId }),
     });
   },
 

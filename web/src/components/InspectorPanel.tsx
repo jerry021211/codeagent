@@ -31,14 +31,11 @@ type Props = {
   tasksLoading?: boolean;
   taskBusy?: boolean;
   taskList?: TaskList;
-  taskLists?: TaskList[];
   onContinueTask?: (task: TaskResource) => void;
   onCreateTask?: (input: { subject: string; description: string; activeForm?: string }) => void;
-  onSelectTaskList?: (taskListId: string) => void;
-  onPromoteTaskList?: () => void;
 };
 
-export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], tasksLoading, taskBusy, taskList, taskLists, onContinueTask, onCreateTask, onSelectTaskList, onPromoteTaskList }: Props) {
+export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], tasksLoading, taskBusy, taskList, onContinueTask, onCreateTask }: Props) {
   const [tab, setTab] = useState<"run" | "tasks" | "debug">("tasks");
   return (
     <aside className="flex h-full min-h-0 w-full flex-col border-l border-line bg-surface">
@@ -51,7 +48,7 @@ export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], task
         {mobile && onClose && <IconButton label="关闭运行面板" onClick={onClose}><X className="size-4" /></IconButton>}
       </header>
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
-        {tab === "run" ? <RunInspector run={run} runtime={runtime} /> : tab === "tasks" ? <TaskPlan tasks={tasks} loading={tasksLoading} busy={taskBusy} taskList={taskList} taskLists={taskLists} onContinue={onContinueTask ?? (() => undefined)} onCreate={onCreateTask ?? (() => undefined)} onSelectList={onSelectTaskList} onPromote={onPromoteTaskList} /> : <DebugInspector run={run} runtime={runtime} />}
+        {tab === "run" ? <RunInspector run={run} runtime={runtime} /> : tab === "tasks" ? <TaskPlan tasks={tasks} loading={tasksLoading} busy={taskBusy} taskList={taskList} onContinue={onContinueTask ?? (() => undefined)} onCreate={onCreateTask ?? (() => undefined)} /> : <DebugInspector run={run} runtime={runtime} />}
       </div>
     </aside>
   );

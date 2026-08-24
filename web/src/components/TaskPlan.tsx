@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Check, Circle, CircleDashed, ListChecks, Play, Plus, Share2, X } from "lucide-react";
+import { Check, Circle, CircleDashed, ListChecks, Play, Plus, X } from "lucide-react";
 import type { TaskList, TaskResource } from "@/types/api";
 import { cx } from "@/lib/utils";
 import { isTaskBlocked } from "@/lib/tasks";
@@ -11,11 +11,8 @@ type Props = {
   loading?: boolean;
   busy?: boolean;
   taskList?: TaskList;
-  taskLists?: TaskList[];
   onContinue: (task: TaskResource) => void;
   onCreate: (input: { subject: string; description: string; activeForm?: string }) => void;
-  onSelectList?: (taskListId: string) => void;
-  onPromote?: () => void;
 };
 
 export function TaskPlan(props: Props) {
@@ -54,11 +51,8 @@ export function TaskPlan(props: Props) {
       <TaskPlanHeader
         taskCount={props.tasks.length}
         taskList={props.taskList}
-        taskLists={props.taskLists}
         creating={creating}
         onToggleCreating={() => setCreating((value) => !value)}
-        onSelectList={props.onSelectList}
-        onPromote={props.onPromote}
       />
 
       {creating && (
@@ -107,45 +101,20 @@ export function TaskPlan(props: Props) {
 function TaskPlanHeader({
   taskCount,
   taskList,
-  taskLists,
   creating,
   onToggleCreating,
-  onSelectList,
-  onPromote,
 }: {
   taskCount: number;
   taskList?: TaskList;
-  taskLists?: TaskList[];
   creating: boolean;
   onToggleCreating: () => void;
-  onSelectList?: (taskListId: string) => void;
-  onPromote?: () => void;
 }) {
   return (
     <div className="flex items-center justify-between gap-3">
       <div className="min-w-0 flex-1">
-        <select
-          value={taskList?.id ?? ""}
-          onChange={(event) => onSelectList?.(event.target.value)}
-          className="h-8 w-full rounded-lg border border-line bg-surface px-2 text-xs font-semibold text-ink outline-none"
-        >
-          <option value={taskList?.id ?? ""}>{taskList?.name || "当前任务列表"}</option>
-          {taskLists
-            ?.filter((item) => item.id !== taskList?.id && item.scope === "workspace_shared")
-            .map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-        </select>
+        <div className="truncate text-xs font-semibold text-ink">{taskList?.name || "当前任务列表"}</div>
         <div className="mt-1 text-[10px] text-ink-faint">{taskCount} 个任务 · 当前会话直接执行</div>
       </div>
-      {taskList?.scope === "conversation_private" && (
-        <button
-          type="button"
-          onClick={onPromote}
-          title="提升为工作区共享列表"
-          className="grid size-8 shrink-0 place-items-center rounded-xl border border-line text-ink-muted hover:bg-surface-muted hover:text-ink"
-        >
-          <Share2 className="size-3.5" />
-        </button>
-      )}
       <button
         type="button"
         onClick={onToggleCreating}
