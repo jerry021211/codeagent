@@ -28,13 +28,13 @@ codeagent/
   runtime/          # 后台任务/运行时占位
   teams/            # 多 agent 通讯占位
   worktrees/        # worktree 隔离占位
-  mcp/              # MCP 路由占位
+  mcp/              # 外部 MCP Server 配置、连接与工具适配
   recovery/         # 分类、退避、fallback 与续写恢复
   events/           # 结构化运行事件与 Token 计量
   web/              # SQLite、FIFO 调度器与 FastAPI/SSE transport
 ```
 
-说明：仓库中的 Web 运行时已是实际实现；`mcp/`、`teams/`、`worktrees/` 和旧的
+说明：仓库中的 Web 运行时和 MCP 工具接入已是实际实现；`teams/`、`worktrees/` 和旧的
 `runtime/background.py` 仍是后续扩展点，不参与当前页面执行链路。
 
 ## Web 工作台
@@ -485,6 +485,67 @@ CONTEXT_REACTIVE_RETRIES=1
 - 硬拒绝：`sudo`、`rm -rf /`、`shutdown` 等直接拒绝
 - 需确认：`rm `、写入 `/etc/`、`chmod 777`、写工作区外文件
 - 默认允许：普通读文件、搜索、工作区内写入和非危险命令
+
+## 接入外部 MCP 工具
+
+项目现在是一个轻量 MCP Host：现有 `bash`、文件读写等工具保持不变，外部 MCP
+Server 提供的工具会额外注册到 Agent。首版只接入 MCP Tools，不处理 Resources、
+Prompts 和 Sampling，保持边界简单。
+
+1. 复制示例配置：
+
+```powershell
+Copy-Item mcp.json.example mcp.json
+```
+
+2. 把 `command` 和 `args` 改成你的 MCP Server 启动命令。配置格式与 Claude Code
+常用的 `mcpServers` 格式一致：
+
+```json
+{
+  "mcpServers": {
+    "my-plugin": {
+      "command": "python",
+      "args": ["path/to/mcp_server.py"],
+      "env": {
+        "PLUGIN_API_KEY": "${PLUGIN_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+远程 Streamable HTTP 服务也可以直接配置：
+
+```json
+{
+  "mcpServers": {
+    "remote-plugin": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${PLUGIN_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+3. 正常启动 CLI 或 Web。外部工具名称会显示为
+`mcp__服务名__工具名`，例如 `mcp__github__search_repositories`。每次执行外部 MCP
+工具都会走现有的用户审批流程；没有 `mcp.json` 时 MCP 自动关闭，不影响任何内置功能。
+
+Web 工作台标题栏提供插头形状的“MCP 插件配置”按钮，可以直接添加本地命令或远程
+HTTP Server、套用常用模板并删除已有配置。保存或删除后会自动刷新对应工作区的 MCP
+缓存，下一条消息直接生效；如果当时有任务正在运行，页面会提示重启 CodeAgent。
+对话 checkpoint 会持久化当前 `tool_schema_hash`。恢复旧对话时如果发现工具定义已经
+变化，系统提示会明确要求模型以本轮注册工具为准，忽略历史消息中过时的工具可用性判断。
+
+如需把配置放到其他位置，可在 `.env` 中设置：
+
+```bash
+MCP_CONFIG=config/mcp.json
+```
 
 ## 运行测试
 

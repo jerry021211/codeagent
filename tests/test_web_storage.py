@@ -357,7 +357,7 @@ class SQLiteRepositoryTests(unittest.TestCase):
             status="completed",
             messages=[{"role": "assistant", "content": "done"}],
             todos=[{"content": "test", "status": "completed"}],
-            context={"user_goal": "ship"},
+            context={"user_goal": "ship", "tool_schema_hash": "abc123"},
         )
 
         self.assertEqual(completed.status, "completed")
@@ -367,6 +367,10 @@ class SQLiteRepositoryTests(unittest.TestCase):
             self.repository.get_latest_checkpoint(conversation.id).id,
             checkpoint.id,
         )
+        self.repository.close()
+        self.repository = SQLiteRepository(self.database, recover_incomplete=False)
+        restored = self.repository.get_latest_checkpoint(conversation.id)
+        self.assertEqual(restored.context["tool_schema_hash"], "abc123")
 
     def test_checkpoint_requires_terminal_run(self) -> None:
         _, run = self.create_run(status="running")

@@ -95,6 +95,11 @@ class PermissionPolicy:
     write_tools: tuple[str, ...] = ("write_file", "edit_file")
 
     def check(self, tool_name: str, tool_input: dict[str, Any]) -> PermissionDecision:
+        if tool_name.startswith("mcp__"):
+            reason = "External MCP tool call"
+            if not self._ask(tool_name, tool_input, reason):
+                return PermissionDecision(False, "Permission denied by user")
+
         if tool_name == "bash":
             command = str(tool_input.get("command", ""))
             reason = self._hard_deny_reason(command)

@@ -48,6 +48,20 @@ class OneToolCallClient:
 
 
 class PermissionPolicyTests(unittest.TestCase):
+    def test_mcp_tools_require_approval(self) -> None:
+        requests = []
+        policy = PermissionPolicy(
+            ask=lambda tool_name, tool_input, reason: requests.append(
+                (tool_name, tool_input, reason)
+            )
+            or False,
+        )
+
+        decision = policy.check("mcp__github__search", {"query": "mcp"})
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(requests[0][2], "External MCP tool call")
+
     def test_blocks_hard_denied_bash_command(self) -> None:
         policy = PermissionPolicy()
 

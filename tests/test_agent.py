@@ -19,6 +19,7 @@ from codeagent import (
     ToolDefinition,
     ToolRegistry,
 )
+from codeagent.context import ContextManager, RuntimeState
 from codeagent.tools import SearchMemoryTool, TodoStore, TodoWriteTool
 from codeagent.memory import MemoryConfig, MemoryManager, MemoryStore
 
@@ -66,6 +67,35 @@ class SequenceClient:
 
 
 class AgentTests(unittest.TestCase):
+    def test_legacy_conversation_gets_tool_change_notice(self) -> None:
+        client = SequenceClient(
+            [
+                ModelResponse(
+                    stop_reason="end_turn",
+                    content=[{"type": "text", "text": "done"}],
+                )
+            ]
+        )
+        state = RuntimeState()
+        agent = Agent(
+            client=client,
+            tools=ToolRegistry(),
+            config=AgentConfig(model="fake-model"),
+            context=ContextManager(state=state),
+            messages=[
+                {"role": "user", "content": "Use Context7"},
+                {"role": "assistant", "content": "That tool is unavailable"},
+            ],
+        )
+
+        agent.run("Try again")
+
+        self.assertIn(
+            "registered tool set has changed since the previous turn",
+            client.calls[0]["system"],
+        )
+        self.assertTrue(state.tool_schema_hash)
+
     def test_agent_executes_tool_and_continues(self) -> None:
         tools = ToolRegistry()
         tools.register_handler(

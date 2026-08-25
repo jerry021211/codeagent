@@ -181,6 +181,36 @@ class RuntimeConfigResponse(ApiModel):
     features: dict[str, bool] = Field(default_factory=dict)
 
 
+class SaveMcpServerRequest(ApiModel):
+    workspace: str = Field(min_length=1, max_length=4096)
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    transport: Literal["stdio", "http"]
+    command: str = Field(default="", max_length=4096)
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    cwd: str | None = Field(default=None, max_length=4096)
+    url: str = Field(default="", max_length=8192)
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class McpServerResponse(ApiModel):
+    name: str
+    transport: Literal["stdio", "http"]
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    cwd: str | None = None
+    url: str = ""
+    env_keys: list[str] = Field(default_factory=list)
+    header_keys: list[str] = Field(default_factory=list)
+
+
+class McpConfigResponse(ApiModel):
+    workspace: str
+    config_path: str
+    restart_required: bool = False
+    servers: list[McpServerResponse] = Field(default_factory=list)
+
+
 class WorkspaceEntryResponse(ApiModel):
     name: str
     path: str
@@ -211,8 +241,11 @@ __all__ = [
     "CreateTaskRequest",
     "HealthResponse",
     "MessageResponse",
+    "McpConfigResponse",
+    "McpServerResponse",
     "RunResponse",
     "RuntimeConfigResponse",
+    "SaveMcpServerRequest",
     "TaskActivityResponse",
     "TaskDataResponse",
     "TaskListResponse",

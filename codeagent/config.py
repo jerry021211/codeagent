@@ -70,6 +70,7 @@ class EnvironmentConfig:
     prompt_config: PromptConfig = field(default_factory=PromptConfig)
     recovery_config: RecoveryConfig = field(default_factory=RecoveryConfig)
     planning_mode: PlanningBackend = PlanningBackend.AUTO
+    mcp_config_path: Path = Path("mcp.json")
 
     @classmethod
     def from_env(cls) -> "EnvironmentConfig":
@@ -163,6 +164,7 @@ class EnvironmentConfig:
             planning_mode=PlanningBackend.parse(
                 os.getenv("CODEAGENT_PLANNING_MODE", "auto")
             ),
+            mcp_config_path=Path(os.getenv("MCP_CONFIG", "mcp.json")),
         )
 
     def to_agent_config(

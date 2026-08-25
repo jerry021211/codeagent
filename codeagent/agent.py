@@ -30,6 +30,7 @@ from codeagent.tools import (
     CompactTool,
     SubagentTool,
     ToolRegistry,
+    tool_schema_hash,
 )
 
 SubagentEnvironment = tuple[ToolRegistry, HookManager, ContextManager]
@@ -85,6 +86,7 @@ class Agent:
     memory_catalog: str = ""
     history_observer: HistoryObserver = field(default_factory=HistoryObserver)
     _compact_requested: bool = field(default=False, init=False)
+    _tool_schema_changed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         task_tools = {"TaskCreate", "TaskGet", "TaskList", "TaskUpdate"}
@@ -109,6 +111,11 @@ class Agent:
             self.tools.register(SubagentTool(spawn_fn=self._spawn_subagent))
         if COMPACT_TOOL_NAME not in self.tools:
             self.tools.register(CompactTool(compact_fn=self._request_manual_compact))
+        current_tool_hash = tool_schema_hash(self.tools.schemas())
+        self._tool_schema_changed = bool(self.messages) and (
+            self.context.state.tool_schema_hash != current_tool_hash
+        )
+        self.context.state.tool_schema_hash = current_tool_hash
         if self.messages:
             self.history_observer.restore(
                 generation=self.context.state.history_generation,
@@ -597,6 +604,7 @@ class Agent:
             selected_memory_context=selected_memory_context,
             memory_catalog=memory_catalog,
             skill_catalog=self.skill_catalog,
+            tool_schema_changed=self._tool_schema_changed,
         )
 
     def _prompt_mode(self) -> PromptMode:

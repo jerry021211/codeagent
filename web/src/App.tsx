@@ -3,11 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { cx, isRunActive } from "@/lib/utils";
-import type { ApprovalDecision, Conversation, Message, TaskResource } from "@/types/api";
+import type { ApprovalDecision, Conversation, McpConfig, Message, SaveMcpServer, TaskResource } from "@/types/api";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import { ChatWorkspace } from "@/components/ChatWorkspace";
 import { InspectorPanel } from "@/components/InspectorPanel";
 import { WorkspacePicker } from "@/components/WorkspacePicker";
+import { McpConfigModal } from "@/components/McpConfigModal";
 import { useRunEvents } from "@/hooks/useRunEvents";
 import { useRunStore } from "@/store/runStore";
 
@@ -28,6 +29,8 @@ export default function App() {
   const [notice, setNotice] = useState<string>();
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [workspacePath, setWorkspacePath] = useState<string>();
+  const [mcpOpen, setMcpOpen] = useState(false);
+  const [mcpMessage, setMcpMessage] = useState<string>();
   const { theme, cycleTheme } = useTheme();
 
   const conversationsQuery = useQuery({
@@ -85,6 +88,12 @@ export default function App() {
     queryFn: () => api.listWorkspaces(workspacePath),
     enabled: workspacePickerOpen,
     retry: false,
+  });
+  const mcpWorkspace = selectedConversation?.workspace ?? runtimeQuery.data?.workspace;
+  const mcpQuery = useQuery({
+    queryKey: ["mcp-servers", mcpWorkspace],
+    queryFn: () => api.getMcpConfig(mcpWorkspace!),
+    enabled: mcpOpen && Boolean(mcpWorkspace),
   });
 
   const runId = selectedId ? runIds[selectedId] ?? selectedConversation?.active_run_id ?? undefined : undefined;
@@ -188,6 +197,22 @@ export default function App() {
     onError: (error) => showError(error, setNotice),
   });
 
+  const saveMcpServer = useMutation({
+    mutationFn: (server: SaveMcpServer) => api.saveMcpServer(server),
+    onSuccess: (config) => {
+      queryClient.setQueryData<McpConfig>(["mcp-servers", config.workspace], config);
+      setMcpMessage(config.restart_required ? "配置已保存。当前有任务占用运行时，请重启 CodeAgent 后使用。" : "配置已保存，下一条消息会自动加载新工具。");
+    },
+  });
+
+  const deleteMcpServer = useMutation({
+    mutationFn: ({ workspace, name }: { workspace: string; name: string }) => api.deleteMcpServer(workspace, name),
+    onSuccess: (config) => {
+      queryClient.setQueryData<McpConfig>(["mcp-servers", config.workspace], config);
+      setMcpMessage(config.restart_required ? "配置已删除。当前有任务占用运行时，请重启 CodeAgent。" : "配置已删除，运行时缓存已刷新。");
+    },
+  });
+
   const continueTask = (task: TaskResource) => {
     if (!selectedId || liveRun && isRunActive(liveRun.status)) return;
     sendRun.mutate({
@@ -219,7 +244,7 @@ export default function App() {
         </div>
 
         <div className="relative flex min-h-0 min-w-0 flex-col">
-          <ChatWorkspace title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sendRun.isPending} cancelling={cancelRun.isPending} approval={pendingApproval} approvalBusy={decideApproval.isPending} runtimeModel={runtimeQuery.data?.model} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onToggleTheme={cycleTheme} />
+          <ChatWorkspace title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sendRun.isPending} cancelling={cancelRun.isPending} approval={pendingApproval} approvalBusy={decideApproval.isPending} runtimeModel={runtimeQuery.data?.model} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
         </div>
 
         <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} /></div>
@@ -239,6 +264,20 @@ export default function App() {
         onBrowse={(path) => setWorkspacePath(path)}
         onConfirm={(path) => createConversation.mutate(path)}
         onClose={() => { if (!createConversation.isPending) { setWorkspacePickerOpen(false); setWorkspacePath(undefined); } }}
+      />
+
+      <McpConfigModal
+        open={mcpOpen}
+        workspace={mcpWorkspace}
+        config={mcpQuery.data}
+        loading={mcpQuery.isLoading}
+        saving={saveMcpServer.isPending}
+        deleting={deleteMcpServer.isPending ? deleteMcpServer.variables?.name : undefined}
+        error={mcpQuery.error ? errorMessage(mcpQuery.error) : saveMcpServer.error ? errorMessage(saveMcpServer.error) : deleteMcpServer.error ? errorMessage(deleteMcpServer.error) : undefined}
+        message={mcpMessage}
+        onSave={(server) => { setMcpMessage(undefined); saveMcpServer.mutate(server); }}
+        onDelete={(name) => mcpWorkspace && deleteMcpServer.mutate({ workspace: mcpWorkspace, name })}
+        onClose={() => { if (!saveMcpServer.isPending && !deleteMcpServer.isPending) setMcpOpen(false); }}
       />
 
       {notice && <div role="alert" className="fixed bottom-4 left-1/2 z-[70] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 rounded-xl border border-danger/20 bg-surface px-3 py-2.5 text-xs text-danger shadow-panel"><AlertCircle className="size-4 shrink-0" /><span className="min-w-0">{notice}</span><button type="button" aria-label="关闭提示" onClick={() => setNotice(undefined)}><X className="size-3.5" /></button></div>}

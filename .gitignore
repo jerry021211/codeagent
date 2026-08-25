@@ -9,6 +9,7 @@ dist/
 build/
 *.egg-info/
 .env
+mcp.json
 .memory/
 .transcripts/
 .task_outputs/

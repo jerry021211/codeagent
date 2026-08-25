@@ -25,6 +25,7 @@ class FakeScheduler:
         self.started = False
         self.stopped = False
         self.submissions: list[tuple[str, str]] = []
+        self.mcp_reloads: list[str] = []
 
     def start(self) -> None:
         self.started = True
@@ -51,6 +52,10 @@ class FakeScheduler:
         if approval is None or approval.run_id != run_id:
             raise LookupError(approval_id)
         return self.repository.resolve_approval(approval_id, decision)
+
+    def reload_mcp(self, workspace: str) -> bool:
+        self.mcp_reloads.append(workspace)
+        return True
 
 
 @unittest.skipIf(TestClient is None, "FastAPI test dependencies are not installed")
@@ -215,6 +220,44 @@ class WebApiTests(unittest.TestCase):
         cancelled = self.client.post(f"/api/runs/{run.id}/cancel")
         self.assertEqual(cancelled.status_code, 200)
         self.assertEqual(cancelled.json()["status"], "cancelled")
+
+    def test_mcp_config_can_be_managed_for_workspace(self) -> None:
+        empty = self.client.get(
+            "/api/mcp/servers", params={"workspace": str(self.workspace)}
+        )
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.json()["servers"], [])
+
+        created = self.client.post(
+            "/api/mcp/servers",
+            json={
+                "workspace": str(self.workspace),
+                "name": "github",
+                "transport": "http",
+                "url": "https://example.test/mcp",
+                "headers": {"Authorization": "Bearer ${GITHUB_PAT}"},
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        self.assertFalse(created.json()["restart_required"])
+        self.assertEqual(self.scheduler.mcp_reloads, [str(self.workspace)])
+        self.assertEqual(created.json()["servers"][0]["name"], "github")
+        self.assertEqual(
+            created.json()["servers"][0]["header_keys"], ["Authorization"]
+        )
+        self.assertNotIn("Bearer", json.dumps(created.json()))
+
+        payload = json.loads((self.workspace / "mcp.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            payload["mcpServers"]["github"]["headers"]["Authorization"],
+            "Bearer ${GITHUB_PAT}",
+        )
+
+        deleted = self.client.delete(
+            "/api/mcp/servers/github", params={"workspace": str(self.workspace)}
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json()["servers"], [])
 
     def test_task_list_and_task_crud(self) -> None:
         created = self.client.post(

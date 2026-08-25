@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from collections.abc import Iterable
 from typing import Any
@@ -72,3 +74,16 @@ class ToolRegistry:
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools
+
+
+def tool_schema_hash(schemas: list[dict[str, Any]]) -> str:
+    """Return a stable fingerprint for the tools exposed to the model."""
+
+    ordered = sorted(schemas, key=lambda schema: str(schema.get("name", "")))
+    payload = json.dumps(
+        ordered,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

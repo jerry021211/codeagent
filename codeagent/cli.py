@@ -21,6 +21,7 @@ from codeagent import (
     create_default_registry,
     resolve_planning_backend,
 )
+from codeagent.mcp import McpRouter
 from codeagent.web.storage import SQLiteRepository
 
 
@@ -110,21 +111,30 @@ def main(argv: list[str] | None = None) -> int:
         task_state_provider=task_state_provider,
     )
     prompt_runtime = PromptRuntime(workspace=workspace, config=env.prompt_config)
+    tools = create_default_registry(
+        todo_store=todo_store,
+        todo_log=print,
+        skill_loader=skill_loader,
+        memory_store=memory_store,
+        memory_max_items=env.memory_config.max_loaded_items,
+        planning_backend=planning_backend,
+        task_service=task_repository,
+        task_list_id=task_list_id,
+    )
+    mcp_path = (
+        env.mcp_config_path
+        if env.mcp_config_path.is_absolute()
+        else workspace / env.mcp_config_path
+    )
+    mcp_router = McpRouter(mcp_path)
+    mcp_router.register_tools(tools)
+
     agent = Agent(
         client=env.create_anthropic_client(
             stream=stream,
             on_text=print_stream_token if stream else None,
         ),
-        tools=create_default_registry(
-            todo_store=todo_store,
-            todo_log=print,
-            skill_loader=skill_loader,
-            memory_store=memory_store,
-            memory_max_items=env.memory_config.max_loaded_items,
-            planning_backend=planning_backend,
-            task_service=task_repository,
-            task_list_id=task_list_id,
-        ),
+        tools=tools,
         config=env.to_agent_config(planning_backend=planning_backend),
         hooks=create_default_hooks(
             workspace=workspace,
@@ -148,32 +158,35 @@ def main(argv: list[str] | None = None) -> int:
         memory_catalog=memory_catalog,
     )
 
-    if query:
-        result = agent.run(query)
-        if not stream and result.final_text:
-            print(result.final_text)
-        elif stream:
-            print()
-        return 0
-
-    print("codeagent interactive mode. Type q, quit, or exit to stop.")
-    while True:
-        try:
-            user_input = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
+    try:
+        if query:
+            result = agent.run(query)
+            if not stream and result.final_text:
+                print(result.final_text)
+            elif stream:
+                print()
             return 0
 
-        if user_input.lower() in {"q", "quit", "exit"}:
-            return 0
-        if not user_input:
-            continue
+        print("codeagent interactive mode. Type q, quit, or exit to stop.")
+        while True:
+            try:
+                user_input = input("> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 0
 
-        result = agent.run(user_input)
-        if not stream and result.final_text:
-            print(result.final_text)
-        elif stream:
-            print()
+            if user_input.lower() in {"q", "quit", "exit"}:
+                return 0
+            if not user_input:
+                continue
+
+            result = agent.run(user_input)
+            if not stream and result.final_text:
+                print(result.final_text)
+            elif stream:
+                print()
+    finally:
+        mcp_router.close()
 
 
 def print_stream_token(token: str) -> None:

@@ -4,6 +4,8 @@ import type {
   Conversation,
   CreateRunResponse,
   Message,
+  McpConfig,
+  SaveMcpServer,
   Run,
   RuntimeConfig,
   TaskList,
@@ -130,6 +132,23 @@ export const api = {
 
   getRuntimeConfig() {
     return request<RuntimeConfig>("/runtime-config");
+  },
+
+  getMcpConfig(workspace: string) {
+    return request<McpConfig>(`/mcp/servers?workspace=${encodeURIComponent(workspace)}`);
+  },
+
+  saveMcpServer(server: SaveMcpServer) {
+    return request<McpConfig>("/mcp/servers", {
+      method: "POST",
+      body: JSON.stringify(server),
+    });
+  },
+
+  deleteMcpServer(workspace: string, name: string) {
+    return request<McpConfig>(`/mcp/servers/${encodeURIComponent(name)}?workspace=${encodeURIComponent(workspace)}`, {
+      method: "DELETE",
+    });
   },
 
   eventStreamUrl(runId: string, after?: number) {

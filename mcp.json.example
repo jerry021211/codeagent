@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "my-plugin": {
+      "command": "python",
+      "args": ["path/to/mcp_server.py"],
+      "env": {
+        "PLUGIN_API_KEY": "${PLUGIN_API_KEY}"
+      }
+    }
+  }
+}

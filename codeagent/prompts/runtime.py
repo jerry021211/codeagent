@@ -48,6 +48,7 @@ class PromptRuntime:
         selected_memory_context: str = "",
         memory_catalog: str = "",
         skill_catalog: str = "",
+        tool_schema_changed: bool = False,
     ) -> PromptAssemblyResult:
         fragments = self._build_fragments(
             mode=mode,
@@ -55,6 +56,7 @@ class PromptRuntime:
             selected_memory_context=selected_memory_context,
             memory_catalog=memory_catalog,
             skill_catalog=skill_catalog,
+            tool_schema_changed=tool_schema_changed,
         )
         return self._assemble(fragments)
 
@@ -76,6 +78,7 @@ class PromptRuntime:
         selected_memory_context: str,
         memory_catalog: str,
         skill_catalog: str,
+        tool_schema_changed: bool,
     ) -> list[PromptFragment]:
         fragments: list[PromptFragment] = []
         tool_names = [str(schema["name"]) for schema in tool_schemas]
@@ -114,6 +117,12 @@ class PromptRuntime:
                     ]
                 ),
                 source="templates/tools.md",
+            )
+        if tool_schema_changed:
+            self._add_template(
+                fragments,
+                "tools.changed",
+                "tool_change",
             )
         if "TaskCreate" in tools:
             self._add_template(fragments, "tools.tasks", "tasks")

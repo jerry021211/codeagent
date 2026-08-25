@@ -8,6 +8,19 @@ from codeagent.prompts import PromptConfig, PromptMode, PromptRuntime
 
 
 class PromptRuntimeTests(unittest.TestCase):
+    def test_runtime_warns_when_restored_tool_schema_changed(self) -> None:
+        result = PromptRuntime(workspace=Path.cwd()).assemble(
+            mode=PromptMode.NORMAL,
+            tool_schemas=[{"name": "mcp__context7__query-docs"}],
+            tool_schema_changed=True,
+        )
+
+        self.assertIn(
+            "registered tool set has changed since the previous turn",
+            result.system_prompt,
+        )
+        self.assertIn("tools.changed", [item.id for item in result.trace])
+
     def test_runtime_includes_tool_conditioned_fragments(self) -> None:
         runtime = PromptRuntime(workspace=Path.cwd())
 

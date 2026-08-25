@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, CircleStop, Menu, Monitor, Moon, PanelRight, Send, Sparkles, Square, Sun, Wifi, WifiOff } from "lucide-react";
+import { Bot, CircleStop, Menu, Monitor, Moon, PanelRight, Plug, Send, Sparkles, Square, Sun, Wifi, WifiOff } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Approval, ApprovalDecision, Message, RunStatus } from "@/types/api";
@@ -29,6 +29,7 @@ type Props = {
   onApprovalDecision: (decision: ApprovalDecision) => void;
   onOpenLeft: () => void;
   onOpenRight: () => void;
+  onOpenMcp: () => void;
   onToggleTheme: () => void;
 };
 
@@ -79,6 +80,7 @@ export function ChatWorkspace(props: Props) {
           </div>
         </div>
         {props.workspace && <div className="hidden max-w-52 truncate rounded-lg border border-line bg-surface-muted px-2.5 py-1 font-mono text-[9px] text-ink-muted md:block" title={props.workspace}>{props.workspace}</div>}
+        <IconButton label="配置 MCP 插件" onClick={props.onOpenMcp}><Plug className="size-4" /></IconButton>
         <IconButton label={`当前主题：${props.theme === "system" ? "跟随系统" : props.theme === "light" ? "浅色" : "深色"}，点击切换`} onClick={props.onToggleTheme}>
           {props.theme === "system" ? <Monitor className="size-4" /> : props.theme === "light" ? <Sun className="size-4" /> : <Moon className="size-4" />}
         </IconButton>

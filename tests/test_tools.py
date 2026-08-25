@@ -17,10 +17,25 @@ from codeagent.tools import (
     TodoStore,
     TodoWriteTool,
     create_todo_final_status_hook,
+    tool_schema_hash,
 )
 
 
 class DefaultToolTests(unittest.TestCase):
+    def test_tool_schema_hash_is_stable_and_tracks_schema_changes(self) -> None:
+        first = [
+            {"name": "beta", "input_schema": {"type": "object"}},
+            {"name": "alpha", "description": "first"},
+        ]
+        reordered = list(reversed(first))
+        changed = [
+            {"name": "beta", "input_schema": {"type": "object"}},
+            {"name": "alpha", "description": "updated"},
+        ]
+
+        self.assertEqual(tool_schema_hash(first), tool_schema_hash(reordered))
+        self.assertNotEqual(tool_schema_hash(first), tool_schema_hash(changed))
+
     def test_default_registry_exposes_plain_tool_schemas(self) -> None:
         registry = create_default_registry()
         schemas = {schema["name"]: schema for schema in registry.schemas()}

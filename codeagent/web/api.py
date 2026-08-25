@@ -31,9 +31,12 @@ try:  # Keep the core/CLI package importable without optional web dependencies.
         CreateTaskListRequest,
         CreateTaskRequest,
         HealthResponse,
+        McpConfigResponse,
+        McpServerResponse,
         MessageResponse,
         RunResponse,
         RuntimeConfigResponse,
+        SaveMcpServerRequest,
         TaskActivityResponse,
         TaskListResponse,
         TaskResourceResponse,
@@ -54,6 +57,7 @@ from codeagent.web.models import (
     MessageRecord,
     RunRecord,
 )
+from codeagent.mcp import delete_mcp_server, load_mcp_document, save_mcp_server
 from codeagent.web.storage import (
     ACTIVE_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -275,6 +279,68 @@ def create_app(
             parent=listing.parent,
             roots=list(listing.roots),
             entries=[entry.to_dict() for entry in listing.entries],
+        )
+
+    @app.get("/api/mcp/servers", response_model=McpConfigResponse)
+    def list_mcp_servers(
+        workspace: str = Query(max_length=4096),
+    ) -> McpConfigResponse:
+        selected = workspace_catalog.resolve(workspace)
+        config_path = _mcp_config_path(runtime_env, selected)
+        return _mcp_config_response(selected, config_path)
+
+    @app.post(
+        "/api/mcp/servers",
+        response_model=McpConfigResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def save_mcp_server_config(body: SaveMcpServerRequest) -> McpConfigResponse:
+        selected = workspace_catalog.resolve(body.workspace)
+        config_path = _mcp_config_path(runtime_env, selected)
+        if body.transport == "stdio":
+            if not body.command.strip():
+                raise ValueError("Local MCP servers require a command")
+            server = {
+                "type": "stdio",
+                "command": body.command.strip(),
+                "args": body.args,
+                "env": body.env,
+            }
+            if body.cwd:
+                server["cwd"] = body.cwd
+        else:
+            if not body.url.startswith(("http://", "https://")):
+                raise ValueError("Remote MCP server URL must start with http:// or https://")
+            server = {
+                "type": "http",
+                "url": body.url,
+                "headers": body.headers,
+            }
+        save_mcp_server(config_path, body.name, server)
+        reloaded = _reload_mcp_runtime(scheduler, selected)
+        return _mcp_config_response(
+            selected,
+            config_path,
+            restart_required=not reloaded,
+        )
+
+    @app.delete(
+        "/api/mcp/servers/{server_name}",
+        response_model=McpConfigResponse,
+    )
+    def remove_mcp_server(
+        server_name: str,
+        workspace: str = Query(max_length=4096),
+    ) -> McpConfigResponse:
+        selected = workspace_catalog.resolve(workspace)
+        config_path = _mcp_config_path(runtime_env, selected)
+        if not delete_mcp_server(config_path, server_name):
+            raise RecordNotFoundError(f"MCP server not found: {server_name}")
+        reloaded = _reload_mcp_runtime(scheduler, selected)
+        return _mcp_config_response(
+            selected,
+            config_path,
+            restart_required=not reloaded,
         )
 
     @app.get(
@@ -631,6 +697,7 @@ def create_app(
                 "debug_metadata": True,
                 "workspace_browser": True,
                 "tasks": True,
+                "mcp_config": True,
             },
         )
 
@@ -834,6 +901,53 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _mcp_config_path(runtime_env: Any, workspace: Path) -> Path:
+    configured = Path(_config_value(runtime_env, "mcp_config_path") or "mcp.json")
+    path = configured if configured.is_absolute() else workspace / configured
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(workspace)
+    except ValueError as exc:
+        raise ValueError("MCP config must be inside the selected workspace") from exc
+    return resolved
+
+
+def _mcp_config_response(
+    workspace: Path,
+    config_path: Path,
+    *,
+    restart_required: bool = False,
+) -> McpConfigResponse:
+    payload = load_mcp_document(config_path)
+    servers: list[McpServerResponse] = []
+    for name, raw_value in payload.get("mcpServers", {}).items():
+        raw = dict(raw_value)
+        transport = "http" if raw.get("url") else "stdio"
+        servers.append(
+            McpServerResponse(
+                name=name,
+                transport=transport,
+                command=str(raw.get("command", "")),
+                args=[str(item) for item in raw.get("args", [])],
+                cwd=str(raw["cwd"]) if raw.get("cwd") else None,
+                url=str(raw.get("url", "")),
+                env_keys=sorted(str(key) for key in raw.get("env", {})),
+                header_keys=sorted(str(key) for key in raw.get("headers", {})),
+            )
+        )
+    return McpConfigResponse(
+        workspace=str(workspace),
+        config_path=str(config_path),
+        restart_required=restart_required,
+        servers=servers,
+    )
+
+
+def _reload_mcp_runtime(scheduler: Any, workspace: Path) -> bool:
+    reload_mcp = getattr(scheduler, "reload_mcp", None)
+    return bool(reload_mcp(str(workspace))) if callable(reload_mcp) else False
 
 
 def _origin_is_allowed(origin: str | None) -> bool:

@@ -33,6 +33,7 @@ class ContextConfig:
 class RuntimeState:
     user_goal: str = ""
     history_generation: int = 0
+    tool_schema_hash: str = ""
     files_read: dict[str, dict[str, Any]] = field(default_factory=dict)
     tool_call_counts: dict[str, int] = field(default_factory=dict)
     tool_artifacts: list[str] = field(default_factory=list)

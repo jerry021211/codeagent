@@ -23,6 +23,7 @@ from codeagent import (
 )
 from codeagent.context import RuntimeState
 from codeagent.events import EventEmitter, UsageTracker
+from codeagent.mcp import McpRouter
 from codeagent.permissions import PermissionPolicy, WaitingPermissionBroker
 from codeagent.runtime import CancellationToken
 from codeagent.tools import WorkspaceGuard
@@ -36,6 +37,7 @@ class WebAgentFactory:
         self.workspace = Path(workspace).resolve()
         self.workspace_guard = WorkspaceGuard(self.workspace)
         self.task_service = task_service
+        self._mcp_routers: dict[Path, McpRouter] = {}
 
     def create(
         self,
@@ -95,7 +97,7 @@ class WebAgentFactory:
         usage_tracker = UsageTracker()
 
         def tools_for():
-            return create_default_registry(
+            registry = create_default_registry(
                 skill_loader=skill_loader,
                 memory_store=memory_store,
                 allow_memory_write=True,
@@ -109,6 +111,8 @@ class WebAgentFactory:
                 run_id=execution.run_id,
                 agent_id=execution.agent_id,
             )
+            self._mcp_router().register_tools(registry)
+            return registry
 
         policy = PermissionPolicy(
             workspace=self.workspace,
@@ -175,7 +179,32 @@ class WebAgentFactory:
     def for_workspace(self, workspace: str | Path) -> "WebAgentFactory":
         """Return an isolated factory while reusing immutable environment config."""
 
-        return type(self)(self.env, workspace, self.task_service)
+        factory = type(self)(self.env, workspace, self.task_service)
+        factory._mcp_routers = self._mcp_routers
+        return factory
+
+    def close(self) -> None:
+        for router in self._mcp_routers.values():
+            router.close()
+        self._mcp_routers.clear()
+
+    def reload_mcp(self, workspace: str | Path) -> None:
+        config_path = self._mcp_config_path(Path(workspace).resolve())
+        router = self._mcp_routers.pop(config_path, None)
+        if router is not None:
+            router.close()
+
+    def _mcp_router(self) -> McpRouter:
+        config_path = self._mcp_config_path(self.workspace)
+        router = self._mcp_routers.get(config_path)
+        if router is None:
+            router = McpRouter(config_path)
+            self._mcp_routers[config_path] = router
+        return router
+
+    def _mcp_config_path(self, workspace: Path) -> Path:
+        configured = self.env.mcp_config_path
+        return configured if configured.is_absolute() else workspace / configured
 
     def _skill_loader(self) -> SkillLoader | None:
         if not self.env.enable_skills:

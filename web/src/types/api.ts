@@ -117,6 +117,38 @@ export type RuntimeConfig = {
   features?: Record<string, boolean>;
 };
 
+export type McpTransport = "stdio" | "http";
+
+export type McpServer = {
+  name: string;
+  transport: McpTransport;
+  command: string;
+  args: string[];
+  cwd?: string | null;
+  url: string;
+  env_keys: string[];
+  header_keys: string[];
+};
+
+export type McpConfig = {
+  workspace: string;
+  config_path: string;
+  restart_required: boolean;
+  servers: McpServer[];
+};
+
+export type SaveMcpServer = {
+  workspace: string;
+  name: string;
+  transport: McpTransport;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
+};
+
 export type WorkspaceEntry = {
   name: string;
   path: string;

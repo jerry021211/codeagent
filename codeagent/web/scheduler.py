@@ -107,6 +107,9 @@ class RunScheduler:
                 except Exception:
                     pass
             self._release(job.run_id)
+        close_factory = getattr(self.agent_factory, "close", None)
+        if callable(close_factory):
+            close_factory()
 
     def submit(self, conversation_id: str, content: str) -> RunRecord:
         prompt = str(content).strip()
@@ -192,6 +195,16 @@ class RunScheduler:
         self._jobs.put(job)
         self.start()
         return self.repository.get_run(run.id) or run
+
+    def reload_mcp(self, workspace: str) -> bool:
+        with self._lock:
+            if any(job.workspace == workspace for job in self._controls.values()):
+                return False
+        reload_factory = getattr(self.agent_factory, "reload_mcp", None)
+        if not callable(reload_factory):
+            return False
+        reload_factory(workspace)
+        return True
 
     def cancel(self, run_id: str) -> RunRecord:
         run = self.repository.request_run_cancel(run_id)
