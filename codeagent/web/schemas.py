@@ -29,6 +29,7 @@ class UpdateConversationRequest(ApiModel):
 
 class CreateRunRequest(ApiModel):
     content: str = Field(min_length=1, max_length=200_000)
+    useTeam: bool = False
 
 
 class ApprovalDecisionRequest(ApiModel):
@@ -88,7 +89,9 @@ class UpdateTaskRequest(ApiModel):
     description: str | None = Field(default=None, min_length=1, max_length=100_000)
     activeForm: str | None = Field(default=None, max_length=500)
     owner: str | None = Field(default=None, max_length=500)
-    status: Literal["pending", "in_progress", "completed"] | None = None
+    status: Literal[
+        "pending", "in_progress", "completed", "failed", "cancelled"
+    ] | None = None
     addBlocks: list[str] = Field(default_factory=list)
     addBlockedBy: list[str] = Field(default_factory=list)
     removeBlocks: list[str] = Field(default_factory=list)
@@ -102,7 +105,7 @@ class TaskDataResponse(ApiModel):
     description: str
     activeForm: str | None = None
     owner: str | None = None
-    status: Literal["pending", "in_progress", "completed"]
+    status: Literal["pending", "in_progress", "completed", "failed", "cancelled"]
     blocks: list[str] = Field(default_factory=list)
     blockedBy: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -229,9 +232,72 @@ class HealthResponse(ApiModel):
     database: Literal["ok"] = "ok"
 
 
+class CreateTeamRunRequest(ApiModel):
+    rootRunId: str = Field(min_length=1, max_length=200)
+    taskListId: str = Field(min_length=1, max_length=200)
+    baseCommit: str = Field(min_length=1, max_length=200)
+    plan: dict[str, Any]
+    teammateCount: int = Field(default=2, ge=1, le=8)
+    maxTeammates: int = Field(default=3, ge=1, le=8)
+    tokenBudget: int | None = Field(default=None, ge=1)
+    modelCallBudget: int | None = Field(default=None, ge=1)
+    deadlineAt: str | None = None
+    allowDirty: bool = False
+
+
+class CreateTeamPlanRevisionRequest(ApiModel):
+    plan: dict[str, Any]
+    commandId: str = Field(min_length=1, max_length=200)
+
+
+class TeamDecisionRequest(ApiModel):
+    decision: Literal["approve", "reject"]
+    reason: str = Field(min_length=1, max_length=10_000)
+    commandId: str = Field(min_length=1, max_length=200)
+
+
+class AttemptPlanDecisionRequest(TeamDecisionRequest):
+    revision: int = Field(ge=1)
+
+
+class CandidateReviewRequest(ApiModel):
+    decision: Literal["accept", "rework"]
+    reason: str = Field(min_length=1, max_length=10_000)
+    commandId: str = Field(min_length=1, max_length=200)
+
+
+class CandidateUserApprovalRequest(ApiModel):
+    decision: Literal["approve", "reject"]
+    reason: str = Field(min_length=1, max_length=10_000)
+    commandId: str = Field(min_length=1, max_length=200)
+
+
+class ManualIntegrationRequest(ApiModel):
+    targetRef: str = Field(min_length=1, max_length=500)
+    commandId: str = Field(min_length=1, max_length=200)
+
+
+class TeamCancelRequest(ApiModel):
+    reason: str = Field(min_length=1, max_length=10_000)
+    commandId: str = Field(min_length=1, max_length=200)
+
+
+class AttemptResumeRequest(ApiModel):
+    reason: str = Field(min_length=1, max_length=10_000)
+    acknowledgeUnknownResult: bool = False
+    commandId: str = Field(min_length=1, max_length=200)
+
+
+class WorktreeDispositionRequest(ApiModel):
+    action: Literal["retain", "cleanup"]
+    commandId: str = Field(min_length=1, max_length=200)
+
+
 __all__ = [
     "ApprovalDecisionRequest",
     "ApprovalResponse",
+    "AttemptPlanDecisionRequest",
+    "AttemptResumeRequest",
     "ConversationResponse",
     "BindTaskListRequest",
     "CreateConversationRequest",
@@ -239,20 +305,28 @@ __all__ = [
     "CreateRunResponse",
     "CreateTaskListRequest",
     "CreateTaskRequest",
+    "CreateTeamPlanRevisionRequest",
+    "CreateTeamRunRequest",
     "HealthResponse",
     "MessageResponse",
+    "ManualIntegrationRequest",
     "McpConfigResponse",
     "McpServerResponse",
     "RunResponse",
     "RuntimeConfigResponse",
+    "CandidateReviewRequest",
+    "CandidateUserApprovalRequest",
     "SaveMcpServerRequest",
     "TaskActivityResponse",
     "TaskDataResponse",
     "TaskListResponse",
     "TaskResourceResponse",
+    "TeamCancelRequest",
+    "TeamDecisionRequest",
     "UpdateConversationRequest",
     "UpdateTaskListRequest",
     "UpdateTaskRequest",
     "WorkspaceEntryResponse",
     "WorkspaceListingResponse",
+    "WorktreeDispositionRequest",
 ]

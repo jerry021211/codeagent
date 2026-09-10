@@ -132,7 +132,11 @@ class TaskGetTool:
     definition: ToolDefinition = field(
         default=ToolDefinition(
             name="TaskGet",
-            description="Get one task from the current task list.",
+            description=(
+                "Get one task's full details by taskId from the current task list, "
+                "including its description, completion conditions, and metadata. "
+                "Use after TaskList when you need to inspect or execute a task."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {"taskId": {"type": "string"}},
@@ -152,7 +156,11 @@ class TaskListTool:
     definition: ToolDefinition = field(
         default=ToolDefinition(
             name="TaskList",
-            description="List tasks in the current task list, including dependencies and owners.",
+            description=(
+                "List task summaries in the current task list: id, subject, status, "
+                "owner, blocks, and blockedBy. Descriptions and metadata are omitted; "
+                "use TaskGet with a taskId for full details before executing a task."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -174,7 +182,17 @@ class TaskListTool:
             owner=owner,
         )
         return json.dumps(
-            [resource.task.to_dict(camel_case=True) for resource in resources],
+            [
+                {
+                    "id": resource.task.id,
+                    "subject": resource.task.subject,
+                    "status": resource.task.status.value,
+                    "owner": resource.task.owner,
+                    "blocks": list(resource.task.blocks),
+                    "blockedBy": list(resource.task.blocked_by),
+                }
+                for resource in resources
+            ],
             ensure_ascii=False,
             indent=2,
         )

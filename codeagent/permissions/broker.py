@@ -5,12 +5,14 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from codeagent.runtime.cancellation import CancellationToken
+from codeagent.runtime.activity import ExecutionActivity
 
 PermissionPrompt = Callable[[str, dict[str, Any], str], bool]
 
@@ -106,6 +108,7 @@ class WaitingPermissionBroker:
         self._poll_interval = poll_interval
         self._lock = threading.Lock()
         self._pending: dict[str, _PendingRequest] = {}
+        self.execution_activity: ExecutionActivity | None = None
 
     @property
     def pending(self) -> tuple[PermissionRequest, ...]:
@@ -125,6 +128,24 @@ class WaitingPermissionBroker:
     ) -> bool:
         """Publish a request and block until allow, deny, timeout, or cancellation."""
 
+        with (
+            self.execution_activity.operation("approval", float("inf"))
+            if self.execution_activity is not None else nullcontext()
+        ):
+            return self._request(
+                tool_name, tool_input, reason,
+                cancellation=cancellation, timeout=timeout,
+            )
+
+    def _request(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        reason: str,
+        *,
+        cancellation: CancellationToken | None,
+        timeout: float | None,
+    ) -> bool:
         if cancellation is not None:
             cancellation.raise_if_cancelled()
 

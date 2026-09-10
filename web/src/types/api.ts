@@ -23,7 +23,12 @@ export type Conversation = {
   active_task_list_id?: Identifier | null;
 };
 
-export type TaskStatus = "pending" | "in_progress" | "completed";
+export type TaskStatus =
+  | "pending"
+  | "in_progress"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export type TaskRecord = {
   id: string;
@@ -79,6 +84,9 @@ export type TokenUsage = {
   prompt_input_tokens?: number | null;
   cache_hit_ratio?: number | null;
   total_tokens?: number | null;
+  model_calls?: number | null;
+  available_calls?: number | null;
+  unavailable_calls?: number | null;
   estimated?: boolean;
   available?: boolean;
 };
@@ -115,6 +123,187 @@ export type RuntimeConfig = {
   max_iterations?: number | null;
   planning_backend?: "tasks" | "todo";
   features?: Record<string, boolean>;
+};
+
+export type TeamRun = {
+  id: Identifier;
+  conversation_id: Identifier;
+  root_run_id: Identifier;
+  task_list_id: Identifier;
+  lead_agent_id: Identifier;
+  base_commit: string;
+  state: string;
+  active_plan_revision?: number | null;
+  max_teammates: number;
+  token_budget?: number | null;
+  model_call_budget?: number | null;
+  deadline_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TeamPlanRevision = {
+  team_run_id: Identifier;
+  revision: number;
+  status: string;
+  plan: Record<string, unknown>;
+  created_by: Identifier;
+  created_at: string;
+  decision_reason?: string | null;
+};
+
+export type TeamSession = {
+  id: Identifier;
+  agent_id: Identifier;
+  generation: number;
+  state: string;
+  heartbeat_at: string;
+  current_attempt_id?: Identifier | null;
+  waiting_reason?: string | null;
+  failure?: Record<string, unknown> | null;
+};
+
+export type TeamAttempt = {
+  id: Identifier;
+  task_id: string;
+  agent_id: Identifier;
+  state: string;
+  ordinal: number;
+  write_enabled: boolean;
+  result_unknown: boolean;
+  error?: Record<string, unknown> | null;
+};
+
+export type AttemptPlan = {
+  id: Identifier;
+  attempt_id: Identifier;
+  revision: number;
+  status: string;
+  summary: string;
+  risk_level: string;
+  planned_files: string[];
+  planned_commands: string[];
+  write_scopes: string[];
+  decision_reason?: string | null;
+};
+
+export type TeamCandidate = {
+  id: Identifier;
+  task_id: string;
+  attempt_id: Identifier;
+  revision: number;
+  status: string;
+  summary: string;
+  changed_files: string[];
+  untracked_files: string[];
+  tests_reported: string[];
+  known_risks: string[];
+  review_reason?: string | null;
+  user_approval_required: boolean;
+  user_decision?: string | null;
+  user_decided_by?: string | null;
+  user_decided_at?: string | null;
+  user_decision_reason?: string | null;
+  commit_hash?: string | null;
+  integrated_commit?: string | null;
+  integrated_at?: string | null;
+};
+
+export type TeamWorktree = {
+  id: Identifier;
+  attempt_id: Identifier;
+  path: string;
+  branch: string;
+  state: string;
+  write_scopes: string[];
+  write_enabled: boolean;
+  frozen_reason?: string | null;
+};
+
+export type TeamScheduling = {
+  task_id: string;
+  dependency_ready: boolean;
+  schedulable: boolean;
+  reasons: string[];
+};
+
+export type TeamRecovery = {
+  attempt_id: Identifier;
+  task_id: string;
+  agent_id: Identifier;
+  reason_code: string;
+  summary: string;
+  recoverable: boolean;
+  result_unknown: boolean;
+  tool_name?: string | null;
+  tool_call_id?: string | null;
+  tool_executed: boolean;
+  allowed_scopes: string[];
+  outside_paths: string[];
+  worktree_path?: string | null;
+  blocking_checks: string[];
+};
+
+export type TeamSnapshot = {
+  team: TeamRun;
+  base_confirmation?: Record<string, unknown> | null;
+  plans: TeamPlanRevision[];
+  agents: Array<{ id: Identifier; role: string; name: string; model?: string }>;
+  sessions: TeamSession[];
+  tasks: TaskResource[];
+  scheduling: TeamScheduling[];
+  attempts: TeamAttempt[];
+  attempt_plans: AttemptPlan[];
+  worktrees: TeamWorktree[];
+  recoveries: TeamRecovery[];
+  candidates: TeamCandidate[];
+  validation_runs: Array<{
+    id: Identifier;
+    candidate_id: Identifier;
+    command: string;
+    status: string;
+    exit_code?: number | null;
+    output_ref?: string | null;
+  }>;
+  messages: Array<{
+    id: Identifier;
+    type: string;
+    task_id?: string | null;
+    attempt_id?: Identifier | null;
+    correlation_id?: Identifier | null;
+    payload?: Record<string, unknown>;
+    delivered_at?: string | null;
+    acked_at?: string | null;
+    last_delivery_error?: string | null;
+  }>;
+  integration_checks: Array<Record<string, unknown>>;
+  usage: TokenUsage;
+  manual_integration: {
+    required: boolean;
+    commands: string[];
+    automatic_merge: false;
+  };
+};
+
+export type DatabaseChange = {
+  seq: number;
+  occurred_at: string;
+  table_name: string;
+  operation: "insert" | "update" | "delete" | "snapshot";
+  record_key: Record<string, unknown>;
+  changed_fields: string[];
+  identity: Record<string, unknown>;
+  transitions: Record<string, { before: unknown; after: unknown }>;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+};
+
+export type TeamChangesPage = {
+  items: DatabaseChange[];
+  next_cursor: number;
+  has_more: boolean;
+  tables: string[];
+  coverage: string;
 };
 
 export type McpTransport = "stdio" | "http";

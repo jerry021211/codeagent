@@ -14,6 +14,8 @@ from codeagent import (
     EventEmitter,
     UsageTracker,
 )
+from codeagent.runtime.activity import ExecutionActivity
+from codeagent.runtime.cancellation import CancellationToken, ModelCallTimeout
 
 
 class FakeMessages:
@@ -46,13 +48,102 @@ class FakeStream:
     def get_final_message(self):
         return self.final_message
 
+    def __iter__(self):
+        for text in self.text_stream:
+            yield SimpleNamespace(type="content_block_delta", delta=SimpleNamespace(type="text_delta", text=text))
+
+    def close(self):
+        pass
+
 
 class FakeSdkClient:
     def __init__(self, final_message):
         self.messages = FakeMessages(final_message)
+        self.options = []
+
+    def with_options(self, **options):
+        self.options.append(options)
+        return self
 
 
 class AnthropicClientTests(unittest.TestCase):
+    def test_team_thinking_and_tool_arguments_are_activity_without_text(self):
+        now = [0.0]
+        token = CancellationToken()
+        activity = ExecutionActivity(token, response_timeout=5, model_timeout=30, clock=lambda: now[0])
+        labels = []
+        activity.on_activity = labels.append
+        final = SimpleNamespace(stop_reason="tool_use", content=[])
+        sdk = FakeSdkClient(final)
+
+        class Stream(FakeStream):
+            def __iter__(self):
+                for kind, field in [("thinking_delta", "thinking"), ("input_json_delta", "partial_json")]:
+                    now[0] += 4
+                    yield SimpleNamespace(type="content_block_delta", delta=SimpleNamespace(type=kind, **{field: "part"}))
+
+        sdk.messages.stream = lambda **_: Stream(final)
+        texts = []
+        client = AnthropicModelClient(sdk_client=sdk, activity=activity, stream=True, on_text=texts.append)
+        client.create_message(model="fake", system="", messages=[], tools=[], max_tokens=10)
+        self.assertEqual(texts, [])
+        self.assertIn("model_receiving", labels)
+        self.assertEqual(sdk.options[0], {"max_retries": 0, "timeout": 5})
+        self.assertIs(client.fork(stream=False).activity, activity)
+
+    def test_keepalive_does_not_extend_content_idle_deadline(self):
+        now = [0.0]
+        activity = ExecutionActivity(CancellationToken(), response_timeout=5, clock=lambda: now[0])
+        final = SimpleNamespace(stop_reason="end_turn", content=[])
+        sdk = FakeSdkClient(final)
+
+        class Stream(FakeStream):
+            def __iter__(self):
+                for i in range(1, 7):
+                    now[0] = i
+                    yield SimpleNamespace(type="ping")
+
+        sdk.messages.stream = lambda **_: Stream(final)
+        client = AnthropicModelClient(sdk_client=sdk, stream=True, activity=activity)
+        with self.assertRaisesRegex(ModelCallTimeout, "model_response_timeout"):
+            client.create_message(model="fake", system="", messages=[], tools=[], max_tokens=10)
+
+    def test_interrupted_io_records_runtime_deadline_not_network_error(self):
+        now = [0.0]
+        activity = ExecutionActivity(CancellationToken(), response_timeout=5, clock=lambda: now[0])
+        sdk = FakeSdkClient(None)
+
+        def create(**_):
+            now[0] = 6
+            raise OSError("stream closed")
+
+        sdk.messages.create = create
+        events = []
+        client = AnthropicModelClient(
+            sdk_client=sdk, activity=activity,
+            event_emitter=EventEmitter(CallbackEventSink(events.append)),
+        )
+        with self.assertRaises(ModelCallTimeout):
+            client.create_message(model="fake", system="", messages=[], tools=[], max_tokens=10)
+        self.assertEqual([event.type for event in events], ["model.started", "model.failed"])
+        self.assertEqual(events[-1].payload["error_type"], "ModelCallTimeout")
+        self.assertEqual(events[-1].payload["error"], "model_response_timeout")
+
+    def test_non_streaming_late_response_is_discarded(self):
+        now = [0.0]
+        activity = ExecutionActivity(CancellationToken(), response_timeout=5, clock=lambda: now[0])
+        sdk = FakeSdkClient(SimpleNamespace(stop_reason="tool_use", content=[]))
+
+        def create(**_):
+            now[0] = 6
+            return sdk.messages.final_message
+
+        sdk.messages.create = create
+        client = AnthropicModelClient(sdk_client=sdk, activity=activity)
+        with self.assertRaises(ModelCallTimeout):
+            client.create_message(model="fake", system="", messages=[], tools=[], max_tokens=10)
+        self.assertEqual(sdk.options[0]["max_retries"], 0)
+
     def test_non_streaming_create_message_preserves_anthropic_content_blocks(self) -> None:
         final_message = SimpleNamespace(
             stop_reason="tool_use",

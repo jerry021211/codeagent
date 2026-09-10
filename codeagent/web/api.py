@@ -23,16 +23,23 @@ try:  # Keep the core/CLI package importable without optional web dependencies.
     from codeagent.web.schemas import (
         ApprovalDecisionRequest,
         ApprovalResponse,
+        AttemptPlanDecisionRequest,
+        AttemptResumeRequest,
         BindTaskListRequest,
+        CandidateReviewRequest,
+        CandidateUserApprovalRequest,
         ConversationResponse,
         CreateConversationRequest,
         CreateRunRequest,
         CreateRunResponse,
+        CreateTeamPlanRevisionRequest,
+        CreateTeamRunRequest,
         CreateTaskListRequest,
         CreateTaskRequest,
         HealthResponse,
         McpConfigResponse,
         McpServerResponse,
+        ManualIntegrationRequest,
         MessageResponse,
         RunResponse,
         RuntimeConfigResponse,
@@ -40,10 +47,13 @@ try:  # Keep the core/CLI package importable without optional web dependencies.
         TaskActivityResponse,
         TaskListResponse,
         TaskResourceResponse,
+        TeamCancelRequest,
+        TeamDecisionRequest,
         UpdateConversationRequest,
         UpdateTaskListRequest,
         UpdateTaskRequest,
         WorkspaceListingResponse,
+        WorktreeDispositionRequest,
     )
 except ImportError as exc:  # pragma: no cover - exercised only in a core-only install.
     FastAPI = None  # type: ignore[assignment,misc]
@@ -58,6 +68,7 @@ from codeagent.web.models import (
     RunRecord,
 )
 from codeagent.mcp import delete_mcp_server, load_mcp_document, save_mcp_server
+from codeagent.memory import MemoryAccessController
 from codeagent.web.storage import (
     ACTIVE_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -68,6 +79,9 @@ from codeagent.web.storage import (
 )
 from codeagent.web.workspaces import WorkspaceCatalog
 from codeagent.tasks import TaskActivityRecord, TaskListRecord, TaskResource
+from codeagent.runtime import RuntimeDataPaths, TeamSupervisor
+from codeagent.teams import ManualIntegrationVerifier
+from codeagent.worktrees import WorktreeError, WorktreeManagerRegistry
 
 
 _SESSION_COOKIE = "codeagent_session"
@@ -83,6 +97,7 @@ def create_app(
     workspace: str | Path | None = None,
     env: Any | None = None,
     static_dir: str | Path | None = None,
+    team_supervisor: Any | None = None,
 ) -> Any:
     """Build the local-only application with injectable runtime boundaries.
 
@@ -99,31 +114,81 @@ def create_app(
     workspace_path = Path(workspace or Path.cwd()).expanduser().resolve()
     workspace_catalog = WorkspaceCatalog(workspace_path)
     owns_repository = repository is None
-    repo = repository or SQLiteRepository.for_workspace(workspace_path)
-    repo.bind_unassigned_workspaces(str(workspace_path))
     runtime_env = env
-
-    if scheduler is None:
-        try:
+    repo = repository
+    try:
+        if scheduler is None:
             from codeagent.config import EnvironmentConfig
             from codeagent.web.factory import WebAgentFactory
             from codeagent.web.scheduler import RunScheduler
 
             runtime_env = runtime_env or EnvironmentConfig.from_env()
+        configured_data_dir = getattr(runtime_env, "data_dir", None)
+        data_paths = (
+            RuntimeDataPaths(configured_data_dir)
+            if configured_data_dir is not None
+            else RuntimeDataPaths.default()
+        )
+        repo = repo or SQLiteRepository.for_workspace(
+            workspace_path,
+            data_dir=data_paths.root,
+        )
+        repo.bind_unassigned_workspaces(str(workspace_path))
+        memory_access = MemoryAccessController(
+            repo.has_active_team_run_for_workspace
+        )
+        if scheduler is None:
             scheduler = RunScheduler(
                 repo,
-                WebAgentFactory(runtime_env, workspace_path, repo),
+                WebAgentFactory(
+                    runtime_env,
+                    workspace_path,
+                    repo,
+                    data_paths=data_paths,
+                    memory_access=memory_access,
+                ),
             )
-        except (ImportError, RuntimeError) as exc:
-            if owns_repository:
-                repo.close()
-            raise RuntimeError(
-                "Unable to initialize the web runtime. Check MODEL_ID/API_KEY "
-                "and install the optional web dependencies."
-            ) from exc
+    except (ImportError, RuntimeError) as exc:
+        if owns_repository and repo is not None:
+            repo.close()
+        raise RuntimeError(
+            "Unable to initialize the web runtime. Check MODEL_ID/API_KEY "
+            "and install the optional web dependencies."
+        ) from exc
+    assert repo is not None
+    assert scheduler is not None
 
     static_root = _static_root(static_dir)
     session_token = secrets.token_urlsafe(32)
+    team_enabled = bool(getattr(runtime_env, "team_runtime_enabled", False))
+    team_write_enabled = bool(getattr(runtime_env, "team_write_enabled", False))
+    configured_worktree_root = getattr(
+        runtime_env, "team_worktree_root", Path(".codeagent-worktrees")
+    )
+    worktrees = WorktreeManagerRegistry(
+        repo, data_paths.worktree_root(configured_worktree_root)
+    )
+    configure_team = getattr(scheduler, "configure_team_runtime", None)
+    if callable(configure_team):
+        configure_team(worktrees)
+    if team_supervisor is None and team_enabled:
+        builder = getattr(scheduler, "create_team_agent", None)
+        lead_runner = getattr(scheduler, "run_team_lead_cycle", None)
+        if callable(builder):
+            team_supervisor = TeamSupervisor(
+                repo,
+                lambda session, attempt, cancellation: builder(
+                    session, attempt, cancellation, worktrees
+                ),
+                enabled=True,
+                write_enabled=team_write_enabled,
+                max_workers=4,
+                model_response_timeout=getattr(runtime_env, "team_model_response_timeout", 300.0),
+                model_call_timeout=getattr(runtime_env, "team_model_call_timeout", 600.0),
+                worktree_manager=worktrees,
+                lead_runner=lead_runner if callable(lead_runner) else None,
+                lead_activity_provider=getattr(scheduler, "team_lead_activities", None),
+            )
 
     @asynccontextmanager
     async def lifespan(application: Any) -> AsyncIterator[None]:
@@ -131,15 +196,23 @@ def create_app(
         application.state.scheduler = scheduler
         application.state.workspace = workspace_path
         application.state.environment = runtime_env
+        application.state.team_supervisor = team_supervisor
+        application.state.team_worktrees = worktrees
         scheduler.start()
+        if team_supervisor is not None:
+            team_supervisor.start()
         try:
             yield
         finally:
             try:
-                scheduler.stop()
+                if team_supervisor is not None:
+                    team_supervisor.stop()
             finally:
-                if owns_repository:
-                    repo.close()
+                try:
+                    scheduler.stop()
+                finally:
+                    if owns_repository:
+                        repo.close()
 
     app = FastAPI(
         title="CodeAgent Coding Cockpit",
@@ -155,6 +228,8 @@ def create_app(
     app.state.scheduler = scheduler
     app.state.workspace = workspace_path
     app.state.environment = runtime_env
+    app.state.team_supervisor = team_supervisor
+    app.state.team_worktrees = worktrees
 
     @app.middleware("http")
     async def local_security(request: Request, call_next: Any) -> Response:
@@ -219,6 +294,7 @@ def create_app(
 
     @app.exception_handler(StorageConflictError)
     @app.exception_handler(InvalidStateTransitionError)
+    @app.exception_handler(WorktreeError)
     async def conflict_handler(_request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=status.HTTP_409_CONFLICT)
 
@@ -596,7 +672,12 @@ def create_app(
         content = body.content.strip()
         if not content:
             raise HTTPException(status_code=422, detail="Run content cannot be blank.")
-        run = scheduler.submit(conversation_id, content)
+        if body.useTeam and not team_enabled:
+            raise HTTPException(
+                status_code=409,
+                detail="Agent Team is disabled by the current Runtime configuration.",
+            )
+        run = scheduler.submit(conversation_id, content, use_team=body.useTeam)
         return CreateRunResponse(
             run_id=run.id,
             status=run.status,
@@ -698,6 +779,355 @@ def create_app(
                 "workspace_browser": True,
                 "tasks": True,
                 "mcp_config": True,
+                "agent_team": bool(
+                    _config_value(runtime_env, "team_runtime_enabled")
+                ),
+                "agent_team_write": bool(
+                    _config_value(runtime_env, "team_write_enabled")
+                ),
+            },
+        )
+
+    @app.post("/api/teams", status_code=status.HTTP_201_CREATED)
+    def create_team(body: CreateTeamRunRequest) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        run = _require_run(repo, body.rootRunId)
+        conversation = _require_conversation(repo, run.conversation_id)
+        task_list = _require_task_list(repo, body.taskListId)
+        if task_list.workspace != conversation.workspace:
+            raise StorageConflictError(
+                "Team Task list and root conversation must use the same workspace"
+            )
+        repo.validate_team_plan_tasks(task_list.id, body.plan)
+        manager = worktrees.for_workspace(conversation.workspace)
+        inspection = manager.inspect_baseline(body.baseCommit)
+        if inspection.source_dirty and not body.allowDirty:
+            raise StorageConflictError(
+                "Source workspace has uncommitted changes. Confirm allowDirty=true "
+                "after reviewing that those changes will not enter Team Worktrees."
+            )
+        with memory_access.creating_team(conversation.workspace):
+            team = repo.create_team_run(
+                conversation_id=conversation.id,
+                root_run_id=run.id,
+                task_list_id=task_list.id,
+                base_commit=inspection.base_commit,
+                max_teammates=body.maxTeammates,
+                token_budget=body.tokenBudget,
+                model_call_budget=body.modelCallBudget,
+                deadline_at=body.deadlineAt,
+                metadata={
+                    "manual_integration_only": True,
+                    "source_dirty_at_creation": inspection.source_dirty,
+                },
+            )
+        plan_payload = dict(body.plan)
+        plan_payload["base_commit"] = inspection.base_commit
+        plan_payload["integration_mode"] = "manual"
+        plan_payload["teammate_count"] = body.teammateCount
+        plan = repo.create_team_plan_revision(
+            team.id,
+            plan=plan_payload,
+            created_by=team.lead_agent_id,
+            command_id=f"api-create-team-plan:{team.id}:1",
+        )
+        repo.submit_team_plan_revision(
+            team.id,
+            plan.revision,
+            command_id=f"api-submit-team-plan:{team.id}:1",
+        )
+        manager.confirm_baseline(
+            team.id,
+            confirmed_by="user" if inspection.source_dirty else "runtime",
+            allow_dirty=body.allowDirty,
+            command_id=f"api-confirm-team-base:{team.id}",
+        )
+        return _team_snapshot(
+            repo,
+            team.id,
+            allow_code=team_write_enabled,
+        )
+
+    @app.get("/api/teams")
+    def list_teams(
+        conversation_id: str | None = Query(default=None, max_length=200),
+    ) -> list[dict[str, Any]]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        teams = repo.list_team_runs()
+        if conversation_id is not None:
+            teams = [item for item in teams if item.conversation_id == conversation_id]
+        return [
+            _team_snapshot(repo, item.id, allow_code=team_write_enabled)
+            for item in teams
+        ]
+
+    @app.get("/api/teams/{team_run_id}")
+    def get_team(team_run_id: str) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        return _team_snapshot(repo, team_run_id, allow_code=team_write_enabled)
+
+    @app.get("/api/teams/{team_run_id}/changes")
+    def get_team_changes(
+        team_run_id: str,
+        after: int = Query(default=0, ge=0),
+        limit: int = Query(default=100, ge=1, le=200),
+        table: str | None = Query(default=None, max_length=80),
+    ) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        return repo.list_team_changes(team_run_id, after=after, limit=limit, table=table)
+
+    @app.get("/api/teams/{team_run_id}/changes/{sequence}")
+    def get_team_change(team_run_id: str, sequence: int) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        page = repo.list_team_changes(team_run_id, seq=sequence)
+        if not page["items"]:
+            raise RecordNotFoundError("Change not found in this Team")
+        return page["items"][0]
+
+    @app.post("/api/teams/{team_run_id}/plans", status_code=status.HTTP_201_CREATED)
+    def create_team_plan_revision(
+        team_run_id: str,
+        body: CreateTeamPlanRevisionRequest,
+    ) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        team = repo.get_team_run(team_run_id)
+        if team is None:
+            raise RecordNotFoundError(f"TeamRun not found: {team_run_id}")
+        repo.validate_team_plan_tasks(team.task_list_id, body.plan)
+        plan_payload = dict(body.plan)
+        plan_payload["base_commit"] = team.base_commit
+        plan_payload["integration_mode"] = "manual"
+        revisions = repo.list_team_plan_revisions(team_run_id)
+        if revisions:
+            plan_payload["teammate_count"] = revisions[-1].plan.get(
+                "teammate_count", team.max_teammates
+            )
+        plan = repo.create_team_plan_revision(
+            team_run_id,
+            plan=plan_payload,
+            created_by=team.lead_agent_id,
+            command_id=body.commandId,
+        )
+        plan = repo.submit_team_plan_revision(
+            team_run_id,
+            plan.revision,
+            command_id=f"submit:{body.commandId}",
+        )
+        return {
+            "plan": plan.to_dict(),
+            "team": _team_snapshot(
+                repo, team_run_id, allow_code=team_write_enabled
+            ),
+        }
+
+    @app.post("/api/teams/{team_run_id}/plans/{revision}/decision")
+    def decide_team_plan(
+        team_run_id: str,
+        revision: int,
+        body: TeamDecisionRequest,
+    ) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        if body.decision == "approve":
+            worktrees.ensure_baseline_ready(team_run_id)
+        repo.decide_team_plan_revision(
+            team_run_id,
+            revision,
+            decision=body.decision,
+            decided_by="user",
+            reason=body.reason,
+            command_id=body.commandId,
+        )
+        return _team_snapshot(repo, team_run_id, allow_code=team_write_enabled)
+
+    @app.post("/api/teams/{team_run_id}/attempts/{attempt_id}/plan-decision")
+    def decide_attempt_plan(
+        team_run_id: str,
+        attempt_id: str,
+        body: AttemptPlanDecisionRequest,
+    ) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Attempt Plans are decided by the Root/Lead. Send guidance in the "
+                "conversation or wait for the Lead Session."
+            ),
+        )
+
+    @app.post("/api/teams/{team_run_id}/attempts/{attempt_id}/resume")
+    def resume_team_attempt(
+        team_run_id: str,
+        attempt_id: str,
+        body: AttemptResumeRequest,
+    ) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        attempt = repo.get_task_attempt(attempt_id)
+        if attempt.team_run_id != team_run_id:
+            raise RecordNotFoundError(
+                f"Attempt not found in TeamRun: {attempt_id}"
+            )
+        assert team_supervisor is not None
+        team_supervisor.resume_attempt(
+            attempt_id,
+            resumed_by="user",
+            reason=body.reason,
+            command_id=body.commandId,
+            acknowledge_unknown_result=body.acknowledgeUnknownResult,
+        )
+        return _team_snapshot(repo, team_run_id, allow_code=team_write_enabled)
+
+    @app.post("/api/teams/{team_run_id}/candidates/{candidate_id}/review")
+    def review_candidate(
+        team_run_id: str,
+        candidate_id: str,
+        body: CandidateReviewRequest,
+    ) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Candidate semantic review is performed by the Root/Lead. Only a "
+                "separate high-risk user approval is accepted here."
+            ),
+        )
+
+    @app.post("/api/teams/{team_run_id}/candidates/{candidate_id}/approval")
+    def approve_high_risk_candidate(
+        team_run_id: str,
+        candidate_id: str,
+        body: CandidateUserApprovalRequest,
+    ) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        candidate = repo.get_candidate(candidate_id)
+        if candidate.team_run_id != team_run_id:
+            raise RecordNotFoundError(
+                f"Candidate not found in TeamRun: {candidate_id}"
+            )
+        decided = repo.decide_candidate_user_approval(
+            candidate_id,
+            decision=body.decision,
+            decided_by="user",
+            reason=body.reason,
+            command_id=body.commandId,
+        )
+        return {
+            "candidate": decided.to_dict(),
+            "team": _team_snapshot(
+                repo, team_run_id, allow_code=team_write_enabled
+            ),
+        }
+
+    @app.post("/api/teams/{team_run_id}/cancel")
+    def cancel_team(
+        team_run_id: str,
+        body: TeamCancelRequest,
+    ) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        for attempt in repo.list_task_attempts(team_run_id):
+            if attempt.state.value in {"succeeded", "failed", "cancelled", "orphaned"}:
+                continue
+            team_supervisor.cancel_attempt(
+                attempt.id,
+                requested_by="user",
+                reason=body.reason,
+                command_id=f"{body.commandId}:{attempt.id}",
+            )
+        repo.cancel_team_run(
+            team_run_id,
+            cancelled_by="user",
+            reason=body.reason,
+            command_id=body.commandId,
+        )
+        return _team_snapshot(repo, team_run_id, allow_code=team_write_enabled)
+
+    @app.post("/api/teams/{team_run_id}/manual-integration")
+    def verify_manual_integration(
+        team_run_id: str,
+        body: ManualIntegrationRequest,
+    ) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        check = ManualIntegrationVerifier(repo).verify(
+            team_run_id,
+            target_ref=body.targetRef,
+            verified_by="user",
+            command_id=body.commandId,
+        )
+        return {
+            "check": check,
+            "team": _team_snapshot(
+                repo, team_run_id, allow_code=team_write_enabled
+            ),
+        }
+
+    @app.post("/api/teams/{team_run_id}/worktrees/{worktree_id}/disposition")
+    def dispose_worktree(
+        team_run_id: str,
+        worktree_id: str,
+        body: WorktreeDispositionRequest,
+    ) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        binding = repo.get_worktree_binding(worktree_id)
+        if binding.team_run_id != team_run_id:
+            raise RecordNotFoundError(
+                f"Worktree not found in TeamRun: {worktree_id}"
+            )
+        if body.action == "cleanup":
+            binding = worktrees.cleanup_retained(worktree_id)
+        return binding.to_dict()
+
+    @app.get("/api/teams/{team_run_id}/events")
+    async def stream_team_events(
+        request: Request,
+        team_run_id: str,
+        after: int = Query(default=0, ge=0),
+        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    ) -> StreamingResponse:
+        _require_team_enabled(team_enabled, team_supervisor)
+        team = repo.get_team_run(team_run_id)
+        if team is None:
+            raise RecordNotFoundError(f"TeamRun not found: {team_run_id}")
+        cursor = max(after, _parse_event_sequence(last_event_id))
+        terminal = {
+            "completed",
+            "closed_with_unmerged_candidates",
+            "failed",
+            "cancelled",
+        }
+
+        async def generate() -> AsyncIterator[str]:
+            nonlocal cursor
+            while True:
+                if await request.is_disconnected():
+                    return
+                events = await asyncio.to_thread(
+                    repo.list_events, team.root_run_id, after_seq=cursor
+                )
+                if not events:
+                    events = await asyncio.to_thread(
+                        repo.wait_for_events,
+                        team.root_run_id,
+                        cursor,
+                        _HEARTBEAT_SECONDS,
+                    )
+                for event in events:
+                    cursor = max(cursor, event.seq)
+                    if event.type.startswith("team.") or event.payload.get(
+                        "team_run_id"
+                    ) == team_run_id:
+                        yield _encode_sse(event.seq, event.type, event.to_dict())
+                current = repo.get_team_run(team_run_id)
+                if current is None or current.state.value in terminal:
+                    return
+                if not events:
+                    yield ": heartbeat\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
             },
         )
 
@@ -755,6 +1185,203 @@ def _require_task_list(
     if record is None:
         raise RecordNotFoundError(f"Task list not found: {task_list_id}")
     return record
+
+
+def _require_team_enabled(enabled: bool, supervisor: Any | None) -> None:
+    if not enabled:
+        raise RuntimeError("Agent Team is disabled by TEAM_RUNTIME_ENABLED")
+    if supervisor is None:
+        raise RuntimeError("Agent Team supervisor is unavailable")
+
+
+def _team_snapshot(
+    repository: SQLiteRepository,
+    team_run_id: str,
+    *,
+    allow_code: bool,
+) -> dict[str, Any]:
+    team = repository.get_team_run(team_run_id)
+    if team is None:
+        raise RecordNotFoundError(f"TeamRun not found: {team_run_id}")
+    attempts = repository.list_task_attempts(team_run_id)
+    candidates = repository.list_candidates(team_run_id)
+    worktrees = repository.list_worktree_bindings(team_run_id)
+    tasks = repository.list_task_resources(team.task_list_id)
+    sessions = repository.list_agent_sessions(team_run_id)
+    messages = repository.list_team_messages(team_run_id)
+    usage = repository.aggregate_usage(
+        run_id=team.root_run_id, include_breakdown=False
+    )
+    return {
+        "team": team.to_dict(),
+        "base_confirmation": repository.get_team_base_confirmation(team_run_id),
+        "plans": [
+            item.to_dict()
+            for item in repository.list_team_plan_revisions(team_run_id)
+        ],
+        "agents": [item.to_dict() for item in repository.list_team_agents(team_run_id)],
+        "sessions": [
+            item.to_dict() for item in sessions
+        ],
+        "tasks": [item.to_dict(camel_case=True) for item in tasks],
+        "scheduling": [
+            item.to_dict()
+            for item in repository.list_task_scheduling(
+                team_run_id, allow_code=allow_code
+            )
+        ],
+        "attempts": [item.to_dict() for item in attempts],
+        "attempt_plans": [
+            item.to_dict()
+            for attempt in attempts
+            for item in repository.list_attempt_plans(attempt.id)
+        ],
+        "worktrees": [item.to_dict() for item in worktrees],
+        "recoveries": _team_recoveries(
+            repository,
+            attempts=attempts,
+            sessions=sessions,
+            worktrees=worktrees,
+            messages=messages,
+        ),
+        "candidates": [item.to_dict() for item in candidates],
+        "validation_runs": [
+            item.to_dict()
+            for candidate in candidates
+            for item in repository.list_validation_runs(candidate.id)
+        ],
+        "messages": [
+            item.to_dict() for item in messages
+        ],
+        "integration_checks": repository.list_manual_integration_checks(team_run_id),
+        "usage": usage,
+        "manual_integration": {
+            "required": True,
+            "commands": [
+                f"git cherry-pick -x {item.commit_hash}"
+                for item in candidates
+                if item.commit_hash and item.integrated_at is None
+            ],
+            "automatic_merge": False,
+        },
+    }
+
+
+def _team_recoveries(
+    repository: SQLiteRepository,
+    *,
+    attempts: list[Any],
+    sessions: list[Any],
+    worktrees: list[Any],
+    messages: list[Any],
+) -> list[dict[str, Any]]:
+    """Build the current recovery UI from durable runtime records."""
+
+    session_by_id = {item.id: item for item in sessions}
+    worktree_by_attempt = {item.attempt_id: item for item in worktrees}
+    recoverable_reasons = {
+        "model_response_timeout",
+        "model_call_timeout",
+        "scope_violation",
+        "unknown_write_result",
+        "protocol_incomplete",
+        "agent_iteration_limit",
+        "agent_runtime_failed",
+        "agent_result_ready",
+        "service_restart",
+    }
+    summaries = {
+        "model_response_timeout": "模型长时间没有有效响应；worker退出后可检查并恢复",
+        "model_call_timeout": "本轮模型调用达到总时限；未执行迟到的工具调用，可检查并恢复",
+        "scope_violation": "Worktree现场需要处理后重新检查",
+        "unknown_write_result": "写操作结果未知，禁止自动重放",
+        "protocol_incomplete": "Teammate未完成规定的Team提交动作",
+        "agent_iteration_limit": "Teammate达到本次最大迭代次数",
+        "agent_runtime_failed": "模型运行失败后需要人工确认继续",
+        "agent_result_ready": "旧版本worker已退出但Attempt尚未完成",
+        "service_restart": "服务重启中断了正在运行的Attempt",
+    }
+    result: list[dict[str, Any]] = []
+    for attempt in attempts:
+        session = session_by_id.get(attempt.session_id)
+        binding = worktree_by_attempt.get(attempt.id)
+        error_type = str((attempt.error or {}).get("type") or "")
+        reason_code = (
+            "unknown_write_result"
+            if attempt.result_unknown and error_type != "service_restart"
+            else str(
+                (session.waiting_reason if session is not None else None)
+                or (binding.frozen_reason if binding is not None else None)
+                or error_type
+                or ""
+            )
+        )
+        if reason_code not in recoverable_reasons:
+            continue
+        if attempt.state.value not in {"waiting", "orphaned"}:
+            continue
+        executions = repository.list_tool_executions(attempt.id)
+        tool = next(
+            (
+                item
+                for item in reversed(executions)
+                if item.result_unknown or item.status in {"failed", "scope_violation"}
+            ),
+            None,
+        )
+        scope_message = next(
+            (
+                item
+                for item in reversed(messages)
+                if item.attempt_id == attempt.id and item.type == "SCOPE_VIOLATION"
+            ),
+            None,
+        )
+        attempted = (
+            str(scope_message.payload.get("attempted") or "")
+            if scope_message is not None
+            else ""
+        )
+        outside_paths = [
+            item.strip() for item in attempted.split(",") if item.strip()
+        ]
+        blocking_checks = ["runtime_recheck_required"]
+        if attempt.result_unknown:
+            blocking_checks.insert(0, "unknown_result_acknowledgement_required")
+        result.append(
+            {
+                "attempt_id": attempt.id,
+                "task_id": attempt.task_id,
+                "agent_id": attempt.agent_id,
+                "reason_code": reason_code,
+                "summary": summaries.get(reason_code, reason_code),
+                "recoverable": (
+                    attempt.state.value == "waiting"
+                    or (
+                        attempt.state.value == "orphaned"
+                        and error_type == "service_restart"
+                    )
+                ),
+                "result_unknown": attempt.result_unknown,
+                "tool_name": tool.tool_name if tool is not None else None,
+                "tool_call_id": tool.tool_call_id if tool is not None else None,
+                "tool_executed": bool(
+                    tool
+                    and (
+                        tool.result_unknown
+                        or (
+                            tool.status == "scope_violation"
+                            and str(tool.error or "").startswith("Tool changed files")
+                        )
+                    )
+                ),
+                "allowed_scopes": list(binding.write_scopes) if binding else [],
+                "outside_paths": outside_paths,
+                "worktree_path": binding.path if binding else None,
+                "blocking_checks": blocking_checks,
+            }
+        )
+    return result
 
 
 def _conversation_response(

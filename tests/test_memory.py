@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 from codeagent import MemoryConfig, MemoryManager, MemoryStore, ModelResponse
+from codeagent.memory import MemoryAccessController, MemoryWriteBlocked
 from codeagent.tools.memory import LoadMemoryTool, RememberTool, SearchMemoryTool
 
 
@@ -41,6 +43,96 @@ class MemoryStoreTests(unittest.TestCase):
                 )
             with self.assertRaises(KeyError):
                 store.load("../missing")
+
+    def test_empty_index_maintenance_does_not_create_runtime_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "memory"
+            store = MemoryStore(root)
+
+            store.rebuild_index()
+
+            self.assertFalse(root.exists())
+
+    def test_active_team_blocks_all_store_writes_but_not_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "project"
+            project.mkdir()
+            active = False
+            controller = MemoryAccessController(lambda _workspace: active)
+            store = MemoryStore(root / "memory", access_policy=controller.policy(project))
+            store.remember(
+                name="Existing",
+                description="Readable during Team runs.",
+                content="stable",
+            )
+            active = True
+
+            self.assertEqual(store.load("Existing").content, "stable")
+            with self.assertRaises(MemoryWriteBlocked):
+                store.remember(
+                    name="Blocked",
+                    description="Must not be written.",
+                    content="blocked",
+                )
+
+    def test_team_creation_waits_for_an_in_progress_memory_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "project"
+            project.mkdir()
+            active = False
+            controller = MemoryAccessController(lambda _workspace: active)
+            policy = controller.policy(project)
+            write_started = threading.Event()
+            release_write = threading.Event()
+            team_created = threading.Event()
+
+            def write_memory() -> None:
+                with policy.writing():
+                    write_started.set()
+                    release_write.wait(timeout=2)
+
+            def create_team() -> None:
+                nonlocal active
+                with controller.creating_team(project):
+                    active = True
+                team_created.set()
+
+            writer = threading.Thread(target=write_memory)
+            creator = threading.Thread(target=create_team)
+            writer.start()
+            self.assertTrue(write_started.wait(timeout=1))
+            creator.start()
+            self.assertFalse(team_created.wait(timeout=0.05))
+            release_write.set()
+            writer.join(timeout=1)
+            creator.join(timeout=1)
+
+            self.assertTrue(team_created.is_set())
+            with self.assertRaises(MemoryWriteBlocked):
+                with policy.writing():
+                    pass
+
+    def test_teammate_policy_is_read_only_even_without_an_active_team_query(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "project"
+            controller = MemoryAccessController(lambda _workspace: False)
+            store = MemoryStore(
+                root / "memory",
+                access_policy=controller.policy(project, always_read_only=True),
+            )
+            manager = MemoryManager(store, MemoryConfig(auto_extract=False))
+
+            manager.after_turn([], client=None, model="fake", max_tokens=100)
+
+            self.assertFalse(store.root.exists())
+            with self.assertRaises(MemoryWriteBlocked):
+                store.remember(
+                    name="Teammate",
+                    description="Must not write.",
+                    content="blocked",
+                )
 
 
 class MemoryToolTests(unittest.TestCase):

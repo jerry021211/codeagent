@@ -1,1 +1,1 @@
-Important: the registered tool set has changed since the previous turn. The current Registered tools list and API-provided tool schemas are authoritative. Ignore earlier conversation claims that a currently registered tool is unavailable, and use the current tools when they are relevant.
+The available tool schemas changed since the previous turn. The current API-provided schemas are authoritative; ignore stale tool claims in conversation history.

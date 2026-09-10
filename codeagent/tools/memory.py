@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from codeagent.memory import MEMORY_TYPES, MemoryStore
+from codeagent.memory import MEMORY_TYPES, MemoryStore, MemoryWriteBlocked
 from codeagent.tools.base import ToolDefinition
 
 REMEMBER_TOOL_NAME = "remember"
@@ -60,13 +60,16 @@ class RememberTool:
         content: str,
         type: str = "project",
     ) -> str:
-        record = self.store.remember(
-            name=name,
-            description=description,
-            content=content,
-            memory_type=type,
-            source="tool",
-        )
+        try:
+            record = self.store.remember(
+                name=name,
+                description=description,
+                content=content,
+                memory_type=type,
+                source="tool",
+            )
+        except MemoryWriteBlocked as exc:
+            return f"Blocked: {exc}"
         return (
             f"[memory saved] {record.name} "
             f"[{record.memory_type}]: {record.description}"

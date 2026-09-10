@@ -22,9 +22,6 @@ from codeagent.tools import (
     SUBAGENT_TOOL_NAME,
 )
 
-DYNAMIC_BOUNDARY = "<SYSTEM_PROMPT_DYNAMIC_BOUNDARY />"
-
-
 class PromptRuntime:
     """Build the system prompt from the Agent's current capabilities and state."""
 
@@ -84,39 +81,37 @@ class PromptRuntime:
         tool_names = [str(schema["name"]) for schema in tool_schemas]
         tools = set(tool_names)
 
-        if mode == PromptMode.SUBAGENT:
-            identity = self._load_template("subagent")
-            identity_source = "templates/subagent.md"
-        else:
-            identity = self._load_template("identity")
-            identity_source = "templates/identity.md"
+        identity_template = {
+            PromptMode.TEAM_PLANNER: "team_planner",
+            PromptMode.TEAM_LEAD: "team_lead_identity",
+            PromptMode.TEAMMATE_PLAN: "teammate_plan",
+            PromptMode.TEAMMATE_WORK: "teammate_work",
+            PromptMode.TEAMMATE_ANALYSIS: "teammate_analysis",
+            PromptMode.SUBAGENT: "subagent",
+        }.get(mode, "identity")
         self._add(
             fragments,
             "base.identity",
-            identity,
+            self._load_template(identity_template),
             section="static",
-            source=identity_source,
+            source=self._template_source(identity_template),
         )
-        self._add_template(
-            fragments,
-            "base.execution",
-            "execution",
-            section="static",
-        )
+        if mode is PromptMode.NORMAL:
+            self._add_template(
+                fragments,
+                "base.execution",
+                "execution",
+                section="static",
+            )
 
-        if tool_names:
+        project_instructions = self._project_instructions()
+        if project_instructions:
             self._add(
                 fragments,
-                "tools.available",
-                "\n".join(
-                    [
-                        self._load_template("tools"),
-                        "",
-                        "Registered tools:",
-                        ", ".join(tool_names),
-                    ]
-                ),
-                source="templates/tools.md",
+                "project.instructions",
+                project_instructions,
+                section="static",
+                source=".prompts/project.md",
             )
         if tool_schema_changed:
             self._add_template(
@@ -124,7 +119,7 @@ class PromptRuntime:
                 "tools.changed",
                 "tool_change",
             )
-        if "TaskCreate" in tools:
+        if "TaskCreate" in tools and mode != PromptMode.TEAM_PLANNER:
             self._add_template(fragments, "tools.tasks", "tasks")
         if "todo_write" in tools:
             self._add_template(fragments, "tools.todo", "todo")
@@ -147,6 +142,8 @@ class PromptRuntime:
         }
         if tools & memory_tools:
             self._add_template(fragments, "memory.guidance", "memory")
+        if REMEMBER_TOOL_NAME in tools:
+            self._add_template(fragments, "memory.write", "memory_write")
         if memory_catalog and not selected_memory_context:
             self._add(
                 fragments,
@@ -195,7 +192,7 @@ class PromptRuntime:
             fragment_id,
             self._load_template(template_name),
             section=section,
-            source=f"templates/{template_name}.md",
+            source=self._template_source(template_name),
         )
 
     @staticmethod
@@ -231,9 +228,7 @@ class PromptRuntime:
             self.config.dynamic_budget_chars,
         )
 
-        sections = [static]
-        if dynamic:
-            sections.extend([DYNAMIC_BOUNDARY, dynamic])
+        sections = [static, dynamic]
         system_prompt, _ = _clip(
             "\n\n".join(section for section in sections if section),
             self.config.system_budget_chars,
@@ -245,6 +240,9 @@ class PromptRuntime:
         )
 
     def _load_template(self, name: str) -> str:
+        return self._template_path(name).read_text(encoding="utf-8").strip()
+
+    def _template_path(self, name: str) -> Path:
         filename = f"{name}.md"
         if self.config.template_dir is not None:
             directory = self.config.template_dir
@@ -252,12 +250,20 @@ class PromptRuntime:
                 directory = self.workspace / directory
             path = directory / filename
             if path.exists():
-                return path.read_text(encoding="utf-8").strip()
+                return path
+        return self.builtin_template_dir / filename
 
-        project_template = self.workspace / ".prompts" / filename
-        if project_template.exists():
-            return project_template.read_text(encoding="utf-8").strip()
-        return (self.builtin_template_dir / filename).read_text(encoding="utf-8").strip()
+    def _template_source(self, name: str) -> str:
+        path = self._template_path(name)
+        if path.parent == self.builtin_template_dir:
+            return f"templates/{path.name}"
+        return str(path)
+
+    def _project_instructions(self) -> str:
+        path = self.workspace / ".prompts" / "project.md"
+        if not path.is_file():
+            return ""
+        return path.read_text(encoding="utf-8").strip()
 
 
 def _build_section(

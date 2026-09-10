@@ -42,7 +42,7 @@ codeagent/
 项目现在包含一个本机单用户 Coding Cockpit：左侧管理会话，中间显示对话、
 流式回复和 Agent 动作，右侧展示 Token、持久化任务、子 Agent、恢复记录、文件改动与
 脱敏后的调试事件。消息、Run、审批、模型调用用量、事件流和 checkpoint 持久化在
-启动目录的 `.codeagent/state.db`。新建对话时可以从页面选择任意已有的本机项目
+CodeAgent 外部数据目录的 `state/state.db`。新建对话时可以从页面选择任意已有的本机项目
 目录；每个对话永久绑定自己的工作区，后续执行使用该目录专属的 Agent 和工具状态。
 
 安装并构建：
@@ -168,10 +168,14 @@ CLI 会在 `todo_write` 更新计划时打印用户可见的任务表：
 ## Task System：当前会话直接执行
 
 交互式会话注册 `TaskCreate`、`TaskGet`、`TaskList`、`TaskUpdate`。Task 持久化在
-工作区 `.codeagent/state.db`，支持 TaskList、依赖、owner、原子认领和 Activity。
+CodeAgent 外部数据目录的 `state/state.db`，支持 TaskList、依赖、owner、原子认领和 Activity。
 任务业务对象保持九字段：`id`、`subject`、`description`、`activeForm`、`owner`、
 `status`、`blocks`、`blockedBy`、`metadata`；TaskList、revision 和时间戳位于
 独立持久化外壳中。
+
+`TaskList` 只返回 `id`、`subject`、`status`、`owner`、`blocks`、`blockedBy` 六个摘要字段，
+用于浏览和选择任务；执行选中的任务前，用 `TaskGet(taskId)` 获取完整描述、验收条件和
+metadata。`TaskGet` 返回完整九字段，`TaskList` 不携带描述、进度文案或 metadata。
 
 Task 默认在当前 Conversation 中直接执行。开始 Ready 任务时用 `TaskUpdate` 设置
 `in_progress`，完成代码和验证后设置 `completed`，不会为每个任务创建独立对话。
@@ -259,11 +263,14 @@ codeagent/prompts/templates/
 普通 Agent 的身份提示只维护在 `templates/identity.md`；子 Agent 使用
 `templates/subagent.md`。不再通过 `SYSTEM_PROMPT` 环境变量重复配置身份提示。
 
-项目可以用 `.prompts/*.md` 覆盖内置模板，例如：
+项目只能通过一个追加文件提供项目级说明，不能覆盖 Root、Lead 或 Teammate 的
+核心身份和安全规则：
 
 ```text
-.prompts/todo.md
+.prompts/project.md
 ```
+
+`PROMPT_TEMPLATE_DIR` 是部署者显式配置的完整模板目录，只应指向受信任位置。
 
 可配置项：
 
@@ -387,8 +394,9 @@ SKILLS_DIR=.skills
 - `load_memory(name)`：按精确名称加载完整记忆。
 - `remember(name, type, description, content)`：保存稳定、可复用的长期记忆。
 
-记忆保存在 `.memory/` 目录中，每条记忆是一个 markdown 文件，`MEMORY.md` 是自动
-生成的索引。默认 `.memory/` 已加入 `.gitignore`，避免把个人偏好或项目外信息误提交。
+记忆按项目保存在 `CODEAGENT_DATA_DIR/workspaces/<workspace-id>/memory/`，不会写入
+用户 Git 工作区或 Team Worktree。每条记忆是一个 markdown 文件；只有存在记忆记录时
+才生成 `MEMORY.md` 索引。
 
 推荐记忆内容：
 
@@ -403,15 +411,17 @@ SKILLS_DIR=.skills
 - 当前任务的临时状态。
 - 大段工具输出或大段代码。
 
-父 Agent 默认拥有读写 memory 的工具；子 Agent 默认只拥有读 memory 的工具。这样子
-Agent 可以利用长期记忆完成任务，但不会随手污染长期记忆。确实需要让子 Agent 写入时，
-再打开 `MEMORY_ALLOW_SUBAGENT_WRITE=true`。
+普通单 Agent 默认拥有读写 memory 的工具；同步子 Agent 默认只读，确实需要时可通过
+`MEMORY_ALLOW_SUBAGENT_WRITE=true` 开放。任一非终态 Agent Team 存在期间，同一项目的
+Root、Lead 和 Teammate 全部只读；Team 进入终态后 Root 自动恢复写权限。Team 执行结果
+不会在结束后被自动回填进 Memory。
 
 可配置项：
 
 ```bash
+CODEAGENT_DATA_DIR=                 # 留空时使用系统用户数据目录
 ENABLE_MEMORY=true
-MEMORY_DIR=.memory
+MEMORY_DIR=.memory                 # 旧工作区 Memory 的一次性只读导入位置
 MEMORY_MAX_ITEMS_IN_PROMPT=50
 MEMORY_MAX_LOADED_ITEMS=5
 MEMORY_SESSION_BUDGET_CHARS=60000
@@ -450,14 +460,15 @@ python -m codeagent --no-stream "按照我之前记录过的项目讲解偏好�
 预算内。已发送的工具结果之后不再修改。
 
 history 超过 300k 时，专用摘要模型生成结构化 checkpoint，完整旧 history 保存到
-`.transcripts/`，摘要成为下一代的起点。自动压缩、手动 `compact()` 和上下文过长
+Agent 独立的外部 Context 目录，摘要成为下一代的起点。自动压缩、手动 `compact()` 和上下文过长
 恢复共用这个入口。换代后的第一次调用会冷启动缓存，之后继续追加并重新预热。
 
 `RuntimeState` 会持续记录 generation、读取过的文件范围及次数、各工具调用次数、
 任务进度、改动文件、命令、测试结果和工具 artifact 路径。这些状态会随 checkpoint
 保存，并在摘要时提供给专用模型。
 
-模型也可以主动调用：
+外置的大工具结果只能通过当前 Agent 的只读 `load_tool_output` 工具读取；普通
+`read_file` 不会获得外部 Runtime 数据目录权限。模型也可以主动调用：
 
 ```text
 compact()
@@ -475,8 +486,8 @@ CONTEXT_TOOL_RESULT_BUDGET_CHARS=200000
 CONTEXT_SINGLE_TOOL_OUTPUT_MAX_CHARS=80000
 CONTEXT_COMPACT_THRESHOLD_CHARS=300000
 CONTEXT_SUMMARY_MAX_CHARS=12000
-CONTEXT_TRANSCRIPT_DIR=.transcripts
-CONTEXT_TOOL_OUTPUT_DIR=.task_outputs/tool-results
+CONTEXT_TRANSCRIPT_DIR=.transcripts              # 旧目录导入位置
+CONTEXT_TOOL_OUTPUT_DIR=.task_outputs/tool-results  # 旧目录导入位置
 CONTEXT_REACTIVE_RETRIES=1
 ```
 
@@ -546,6 +557,44 @@ HTTP Server、套用常用模板并删除已有配置。保存或删除后会自
 ```bash
 MCP_CONFIG=config/mcp.json
 ```
+
+## Agent Team（第一阶段）
+
+Agent Team 只有“关闭”和“显式开启”两种模式，不分析用户文字猜测是否应该组队。启用
+运行时后，在 Web 输入框左下角点亮一次 `Agent Team`，再发送任务；这个开关只作用于
+下一次提交，提交成功后自动复位。仅在 query 中写“使用 Team”不会切换模式。
+
+```bash
+TEAM_RUNTIME_ENABLED=true
+TEAM_WRITE_ENABLED=true
+```
+
+显式 Team 请求首先进入只读 `team_planner`：Root 创建或复用普通 Task DAG，并必须调用
+`TeamPlanSubmit`。如果模型只输出文字方案却没有提交工具调用，Runtime 会把本次 Run
+标为失败，不会伪装成已创建 Team。Team Plan 获得用户批准后，Runtime 才创建 Teammate、
+Attempt 和代码 Worktree。
+
+执行期间 Root 就是 Lead：Lead 负责 Attempt Plan 和 Candidate 的语义审查；Runtime 负责
+原子认领、权限、写入范围、验证和候选提交。低/中风险审查无需用户代替 Lead 点击；
+高风险 Candidate 仍需用户确认。第一阶段不会自动 merge、cherry-pick、rebase、push，
+也不会修改用户源工作区或主分支。候选提交必须由用户人工集成，之后才能发起只读联合验证。
+
+Team 心跳由 Runtime 观察实际执行阶段，不要求模型定期调用工具报平安。等待模型、接收
+文本/思考/工具参数、网络重试等待、工具执行和权限审批分别显示；模型的 keepalive/ping
+不算有效内容。单次逻辑模型调用默认连续 300 秒没有有效内容，或累计达到 600 秒时暂停。
+累计时间包含本次调用的网络重试和输出截断后的重新生成，不会通过重试重置计时。
+
+```bash
+TEAM_MODEL_RESPONSE_TIMEOUT=300
+TEAM_MODEL_CALL_TIMEOUT=600
+```
+
+模型超时不会直接把 Teammate 判为失联：Runtime 撤销写权限，等待 worker 真正退出，保留
+Task、Attempt、Worktree 和最后安全上下文，进入“需要人工恢复”。确认并通过原有现场
+校验后可以继续；迟到的模型回复不会执行工具，未知写操作不会自动重放。Lead 模型超时
+同样停止本次调用，用户可发送新的团队指令继续。旧版本已经产生的 `orphaned` 记录不会
+因此自动恢复。工具仍使用自己的执行超时，等待审批仍使用原审批超时；普通单 Agent
+和同步 Subagent 不启用这套 Team 模型期限。
 
 ## 运行测试
 

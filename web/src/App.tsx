@@ -17,12 +17,22 @@ type ThemeMode = "system" | "light" | "dark";
 const conversationsKey = ["conversations"] as const;
 const messagesKey = (conversationId: string) => ["conversations", conversationId, "messages"] as const;
 const tasksKey = (taskListId: string) => ["task-lists", taskListId, "tasks"] as const;
+const teamsKey = (conversationId: string) => ["teams", conversationId] as const;
+
+type TeamCommand =
+  | { kind: "team-plan"; revision: number; decision: "approve" | "reject"; reason: string }
+  | { kind: "candidate-approval"; candidateId: string; decision: "approve" | "reject"; reason: string }
+  | { kind: "resume-attempt"; attemptId: string; reason: string; acknowledgeUnknownResult: boolean }
+  | { kind: "cancel"; reason: string }
+  | { kind: "integration"; targetRef: string }
+  | { kind: "cleanup"; worktreeId: string };
 
 export default function App() {
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | undefined>(() => localStorage.getItem("codeagent.conversation") || undefined);
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
+  const [useTeam, setUseTeam] = useState(false);
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
   const [runIds, setRunIds] = useState<Record<string, string>>({});
@@ -70,6 +80,24 @@ export default function App() {
     enabled: Boolean(selectedId),
   });
   const runtimeQuery = useQuery({ queryKey: ["runtime-config"], queryFn: api.getRuntimeConfig, staleTime: 60_000 });
+  const teamEnabled = Boolean(runtimeQuery.data?.features?.agent_team);
+  const teamsQuery = useQuery({
+    queryKey: teamsKey(selectedId ?? ""),
+    queryFn: () => api.listTeams(selectedId!),
+    enabled: teamEnabled && Boolean(selectedId),
+    refetchInterval: teamEnabled ? 5_000 : false,
+  });
+  const team = useMemo(() => {
+    const teams = teamsQuery.data ?? [];
+    const terminal = new Set(["completed", "failed", "cancelled", "closed_with_unmerged_candidates"]);
+    return teams.find((item) => !terminal.has(item.team.state))
+      ?? [...teams].sort((left, right) => right.team.updated_at.localeCompare(left.team.updated_at))[0];
+  }, [teamsQuery.data]);
+  const teamLeadActive = Boolean(team && !["completed", "failed", "cancelled", "closed_with_unmerged_candidates"].includes(team.team.state));
+
+  useEffect(() => {
+    setUseTeam(false);
+  }, [selectedId]);
   const taskListQuery = useQuery({
     queryKey: ["task-lists", taskListId],
     queryFn: () => api.getTaskList(taskListId!),
@@ -117,6 +145,24 @@ export default function App() {
   }, [queryClient, taskListId]);
 
   useEffect(() => {
+    if (!team?.team.id || !selectedId) return;
+    const source = new EventSource(api.teamEventStreamUrl(team.team.id), { withCredentials: true });
+    const refresh = () => void queryClient.invalidateQueries({ queryKey: teamsKey(selectedId) });
+    const eventTypes = [
+      "team.plan.created", "team.plan.submitted", "team.plan.approved", "team.plan.rejected",
+      "team.attempt.assigned", "team.attempt.cancel_requested",
+      "team.attempt_plan.submitted", "team.attempt_plan.approved", "team.attempt_plan.rejected",
+      "team.candidate.submitted", "team.candidate.accepted", "team.candidate.rework",
+      "team.candidate.user_approved", "team.candidate.user_rejected",
+      "team.candidate.committed", "team.candidate.validation_failed", "team.analysis.completed", "team.integration.verified",
+      "team.session.state_changed", "team.session.suspect", "team.scope_violation",
+      "team.worktree.bound", "team.worktree.cleaned", "team.cancelled",
+    ];
+    eventTypes.forEach((type) => source.addEventListener(type, refresh));
+    return () => source.close();
+  }, [queryClient, selectedId, team?.team.id]);
+
+  useEffect(() => {
     if (!runId) return;
     void api.getRun(runId).then((run) => {
       ensureRun(run.id, run.status, run.queue_position);
@@ -154,14 +200,15 @@ export default function App() {
   });
 
   const sendRun = useMutation({
-    mutationFn: async ({ conversationId, content }: { conversationId: string; content: string }) => {
-      const result = await api.createRun(conversationId, content);
+    mutationFn: async ({ conversationId, content, useTeam }: { conversationId: string; content: string; useTeam: boolean }) => {
+      const result = await api.createRun(conversationId, content, useTeam);
       return { ...result, content, conversationId };
     },
     onSuccess: (result) => {
       ensureRun(result.run_id, result.status, result.queue_position);
       setRunIds((current) => ({ ...current, [result.conversationId]: result.run_id }));
       setDraft("");
+      setUseTeam(false);
       void queryClient.invalidateQueries({ queryKey: conversationsKey });
       window.setTimeout(() => void queryClient.invalidateQueries({ queryKey: messagesKey(result.conversationId) }), 150);
     },
@@ -197,6 +244,38 @@ export default function App() {
     onError: (error) => showError(error, setNotice),
   });
 
+  const teamCommand = useMutation({
+    mutationFn: async (command: TeamCommand) => {
+      if (!team) throw new Error("当前会话没有 TeamRun");
+      const teamId = team.team.id;
+      switch (command.kind) {
+        case "team-plan":
+          await api.decideTeamPlan(teamId, command.revision, command.decision, command.reason);
+          return;
+        case "candidate-approval":
+          await api.approveCandidate(teamId, command.candidateId, command.decision, command.reason);
+          return;
+        case "resume-attempt":
+          await api.resumeAttempt(teamId, command.attemptId, command.reason, command.acknowledgeUnknownResult);
+          return;
+        case "cancel":
+          await api.cancelTeam(teamId, command.reason);
+          return;
+        case "integration":
+          await api.verifyManualIntegration(teamId, command.targetRef);
+          return;
+        case "cleanup":
+          await api.disposeWorktree(teamId, command.worktreeId, "cleanup");
+          return;
+      }
+    },
+    onSuccess: () => {
+      if (selectedId) void queryClient.invalidateQueries({ queryKey: teamsKey(selectedId) });
+      if (taskListId) void queryClient.invalidateQueries({ queryKey: tasksKey(taskListId) });
+    },
+    onError: (error) => showError(error, setNotice),
+  });
+
   const saveMcpServer = useMutation({
     mutationFn: (server: SaveMcpServer) => api.saveMcpServer(server),
     onSuccess: (config) => {
@@ -218,6 +297,7 @@ export default function App() {
     sendRun.mutate({
       conversationId: selectedId,
       content: `继续处理 Task #${task.task.id}：${task.task.subject}。先读取 TaskGet，按 description 的完成条件执行，并及时用 TaskUpdate 更新状态。`,
+      useTeam: false,
     });
   };
 
@@ -233,7 +313,21 @@ export default function App() {
       status: "complete",
     };
     queryClient.setQueryData<Message[]>(messagesKey(selectedId), (current = []) => [...current, optimistic]);
-    sendRun.mutate({ conversationId: selectedId, content });
+    sendRun.mutate({ conversationId: selectedId, content, useTeam });
+  };
+
+  const teamPanelProps = {
+    teamEnabled,
+    team,
+    teamLoading: teamsQuery.isLoading,
+    teamBusy: teamCommand.isPending,
+    teamError: teamsQuery.error ? errorMessage(teamsQuery.error) : teamCommand.error ? errorMessage(teamCommand.error) : undefined,
+    onTeamPlan: (revision: number, decision: "approve" | "reject", reason: string) => teamCommand.mutate({ kind: "team-plan", revision, decision, reason }),
+    onCandidateApproval: (candidateId: string, decision: "approve" | "reject", reason: string) => teamCommand.mutate({ kind: "candidate-approval", candidateId, decision, reason }),
+    onResumeAttempt: (attemptId: string, reason: string, acknowledgeUnknownResult: boolean) => teamCommand.mutate({ kind: "resume-attempt", attemptId, reason, acknowledgeUnknownResult }),
+    onCancelTeam: (reason: string) => teamCommand.mutate({ kind: "cancel", reason }),
+    onVerifyIntegration: (targetRef: string) => teamCommand.mutate({ kind: "integration", targetRef }),
+    onCleanupWorktree: (worktreeId: string) => teamCommand.mutate({ kind: "cleanup", worktreeId }),
   };
 
   return (
@@ -244,16 +338,16 @@ export default function App() {
         </div>
 
         <div className="relative flex min-h-0 min-w-0 flex-col">
-          <ChatWorkspace title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sendRun.isPending} cancelling={cancelRun.isPending} approval={pendingApproval} approvalBusy={decideApproval.isPending} runtimeModel={runtimeQuery.data?.model} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
+          <ChatWorkspace title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sendRun.isPending} cancelling={cancelRun.isPending} approval={pendingApproval} approvalBusy={decideApproval.isPending} runtimeModel={runtimeQuery.data?.model} teamAvailable={teamEnabled} useTeam={useTeam} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onUseTeam={setUseTeam} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
         </div>
 
-        <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} /></div>
+        <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} {...teamPanelProps} /></div>
       </div>
 
       <Drawer open={leftOpen} side="left" onClose={() => setLeftOpen(false)}>
         <ConversationSidebar mobile conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} onSearch={setSearch} onSelect={(id) => { setSelectedId(id); setLeftOpen(false); }} onCreate={() => { setLeftOpen(false); setWorkspacePickerOpen(true); }} onArchive={(conversation) => archiveConversation.mutate(conversation)} onClose={() => setLeftOpen(false)} />
       </Drawer>
-      <Drawer open={rightOpen} side="right" onClose={() => setRightOpen(false)} width="min(90vw, 360px)"><InspectorPanel mobile run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} onClose={() => setRightOpen(false)} /></Drawer>
+      <Drawer open={rightOpen} side="right" onClose={() => setRightOpen(false)} width="min(90vw, 360px)"><InspectorPanel mobile run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} onClose={() => setRightOpen(false)} {...teamPanelProps} /></Drawer>
 
       <WorkspacePicker
         open={workspacePickerOpen}

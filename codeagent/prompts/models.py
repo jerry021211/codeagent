@@ -11,10 +11,15 @@ PromptSection = Literal["static", "dynamic"]
 
 
 class PromptMode(str, Enum):
-    """The two system prompt variants used by Agent."""
+    """System prompt variants used by each independent Agent role."""
 
     NORMAL = "normal"
     SUBAGENT = "subagent"
+    TEAM_PLANNER = "team_planner"
+    TEAM_LEAD = "team_lead"
+    TEAMMATE_PLAN = "teammate_plan"
+    TEAMMATE_WORK = "teammate_work"
+    TEAMMATE_ANALYSIS = "teammate_analysis"
 
 
 @dataclass(frozen=True, slots=True)

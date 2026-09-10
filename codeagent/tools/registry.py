@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Callable
 
 from codeagent.tracing import trace_run
 from codeagent.tools.base import Tool, ToolDefinition, ToolHandler
@@ -21,8 +21,13 @@ class _RegisteredTool:
 class ToolRegistry:
     """Explicit tool schema and handler map."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        execution_wrapper: Callable[[str, dict[str, Any], ToolHandler], str]
+        | None = None,
+    ) -> None:
         self._tools: dict[str, _RegisteredTool] = {}
+        self._execution_wrapper = execution_wrapper
 
     def register(self, tool: Tool) -> None:
         self.register_handler(tool.definition, tool.run)
@@ -52,7 +57,12 @@ class ToolRegistry:
                 )
                 return output
             try:
-                output = str(registered.handler(**(args or {})))
+                arguments = args or {}
+                output = (
+                    self._execution_wrapper(name, arguments, registered.handler)
+                    if self._execution_wrapper is not None
+                    else str(registered.handler(**arguments))
+                )
             except Exception as exc:
                 output = f"Error: {type(exc).__name__}: {exc}"
                 tool_trace.end(
@@ -65,10 +75,21 @@ class ToolRegistry:
 
     def copy_without(self, names: Iterable[str]) -> ToolRegistry:
         excluded = set(names)
-        registry = ToolRegistry()
+        registry = ToolRegistry(self._execution_wrapper)
         for name, registered in self._tools.items():
             if name in excluded:
                 continue
+            registry.register_handler(registered.definition, registered.handler)
+        return registry
+
+    def with_execution_wrapper(
+        self,
+        wrapper: Callable[[str, dict[str, Any], ToolHandler], str],
+    ) -> ToolRegistry:
+        """Copy registrations into a registry with one execution boundary."""
+
+        registry = ToolRegistry(wrapper)
+        for registered in self._tools.values():
             registry.register_handler(registered.definition, registered.handler)
         return registry
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 
 from codeagent.events import EventEmitter
 from codeagent.messages import Message
@@ -25,6 +26,8 @@ from codeagent.recovery.models import (
 )
 from codeagent.recovery.policy import RecoveryPolicy
 from codeagent.runtime import CancellationToken
+from codeagent.runtime.activity import ExecutionActivity
+from codeagent.runtime.cancellation import CancelledError
 
 CONTINUATION_PROMPT = (
     "Output token limit hit. Resume directly. No apology, no recap. "
@@ -40,10 +43,12 @@ class RecoveryRuntime:
         config: RecoveryConfig | None = None,
         *,
         log: RecoveryLog | None = None,
+        activity: ExecutionActivity | None = None,
     ) -> None:
         self.config = config or RecoveryConfig()
         self.policy = RecoveryPolicy(self.config)
         self.log = log
+        self.activity = activity
 
     def create_state(self, *, model: str, max_tokens: int) -> RecoveryState:
         return RecoveryState(current_model=model, current_max_tokens=max_tokens)
@@ -60,17 +65,26 @@ class RecoveryRuntime:
         cancellation: CancellationToken | None = None,
     ) -> RecoveryCallResult:
         current_messages = messages
+        activity = self.activity
+        if activity is not None and state.model_deadline is None:
+            state.model_deadline = activity.clock() + activity.model_timeout
         while True:
             if cancellation is not None:
                 cancellation.raise_if_cancelled()
             try:
-                response = call(
-                    state.current_model,
-                    state.current_max_tokens,
-                    current_messages,
-                )
+                with (
+                    activity.operation("model", state.model_deadline)
+                    if activity is not None else nullcontext()
+                ):
+                    response = call(
+                        state.current_model,
+                        state.current_max_tokens,
+                        current_messages,
+                    )
                 state.consecutive_overloaded = 0
                 return RecoveryCallResult(response=response, messages=current_messages)
+            except CancelledError:
+                raise
             except Exception as exc:
                 if cancellation is not None:
                     cancellation.raise_if_cancelled()
@@ -107,7 +121,14 @@ class RecoveryRuntime:
 
                 if decision.action == RecoveryAction.BACKOFF_RETRY:
                     state.retry_count += 1
-                    self._sleep(decision.delay_seconds, cancellation=cancellation)
+                    with (
+                        activity.operation("retry", state.model_deadline)
+                        if activity is not None else nullcontext()
+                    ):
+                        delay = decision.delay_seconds
+                        if activity is not None:
+                            delay = min(delay, max(0, state.model_deadline - activity.clock()))
+                        self._sleep(delay, cancellation=cancellation)
                     continue
 
                 return self._failed(reason, state.last_error)
@@ -155,6 +176,7 @@ class RecoveryRuntime:
                 error=decision.message,
                 reason=decision.reason,
             )
+        state.model_deadline = None
         return RecoveryResponseResult(response=response, messages=messages, reason=reason)
 
     def _failed(self, reason: RecoveryReason, error: str) -> RecoveryCallResult:

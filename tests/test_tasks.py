@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -163,6 +164,51 @@ class TaskSystemTests(unittest.TestCase):
             },
         )
         self.assertIn('"blockedBy": [\n    "1"', dependent)
+
+    def test_task_list_summaries_allow_filtered_selection_and_detail_lookup(self) -> None:
+        registry = create_default_registry(
+            planning_backend=PlanningBackend.TASKS,
+            task_service=self.repository,
+            task_list_id=self.task_list_id,
+            conversation_id=self.conversation.id,
+        )
+        self.assertEqual(json.loads(registry.execute("TaskList")), [])
+        first = json.loads(registry.execute("TaskCreate", {
+            "subject": "Build storage",
+            "description": "Implement storage and verify persistence after reopening.",
+            "activeForm": "Building storage",
+            "metadata": {"validation_commands": ["python -m unittest"]},
+        }))
+        second = json.loads(registry.execute("TaskCreate", {
+            "subject": "Integrate storage",
+            "description": "Connect the verified storage to the API.",
+            "blockedBy": [first["id"]],
+        }))
+        started = json.loads(registry.execute("TaskUpdate", {
+            "taskId": first["id"], "status": "in_progress",
+        }))
+
+        summaries = json.loads(registry.execute("TaskList"))
+        self.assertEqual(len(summaries), 2)
+        by_id = {task["id"]: task for task in summaries}
+        for summary in summaries:
+            self.assertEqual(set(summary), {
+                "id", "subject", "status", "owner", "blocks", "blockedBy",
+            })
+            detail = json.loads(registry.execute("TaskGet", {"taskId": summary["id"]}))
+            for key, value in summary.items():
+                self.assertEqual(detail[key], value)
+        self.assertEqual(by_id[first["id"]]["blocks"], [second["id"]])
+        self.assertEqual(by_id[second["id"]]["blockedBy"], [first["id"]])
+        self.assertEqual(json.loads(registry.execute("TaskList", {
+            "status": "in_progress", "owner": started["owner"],
+        })), [by_id[first["id"]]])
+        self.assertEqual(json.loads(registry.execute("TaskList", {
+            "status": "completed",
+        })), [])
+        detail = json.loads(registry.execute("TaskGet", {"taskId": first["id"]}))
+        for key in ("description", "activeForm", "metadata"):
+            self.assertEqual(detail[key], first[key])
 
     def test_planning_backend_defaults_and_agent_mutual_exclusion(self) -> None:
         self.assertEqual(

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, CircleStop, Menu, Monitor, Moon, PanelRight, Plug, Send, Sparkles, Square, Sun, Wifi, WifiOff } from "lucide-react";
+import { Bot, CircleStop, Menu, Monitor, Moon, PanelRight, Plug, Send, Sparkles, Square, Sun, Users, Wifi, WifiOff } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Approval, ApprovalDecision, Message, RunStatus } from "@/types/api";
@@ -21,9 +21,13 @@ type Props = {
   approval?: Approval;
   approvalBusy?: boolean;
   runtimeModel?: string | null;
+  teamAvailable?: boolean;
+  useTeam?: boolean;
+  teamLeadActive?: boolean;
   workspace?: string;
   theme: "system" | "light" | "dark";
   onDraft: (value: string) => void;
+  onUseTeam: (value: boolean) => void;
   onSend: () => void;
   onCancel: () => void;
   onApprovalDecision: (decision: ApprovalDecision) => void;
@@ -147,12 +151,29 @@ export function ChatWorkspace(props: Props) {
             onKeyDown={onKeyDown}
             rows={1}
             disabled={active}
-            placeholder={active ? "Agent 正在工作…" : "告诉 CodeAgent 你想实现什么…"}
+            placeholder={active ? "Agent 正在工作…" : props.teamLeadActive ? "向 Root / Lead 发送团队指令…" : "告诉 CodeAgent 你想实现什么…"}
             aria-label="发送消息"
             className="scrollbar-thin min-h-11 w-full resize-none bg-transparent px-2.5 py-2 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-60"
           />
           <div className="flex items-center justify-between gap-3 px-1 pt-1">
-            <div className="text-[9px] text-ink-faint"><kbd className="rounded border border-line bg-surface-muted px-1 py-0.5 font-sans">Enter</kbd> 发送 · <kbd className="rounded border border-line bg-surface-muted px-1 py-0.5 font-sans">Shift Enter</kbd> 换行</div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={active || props.teamLeadActive || !props.teamAvailable}
+                onClick={() => props.onUseTeam(!props.useTeam)}
+                aria-pressed={Boolean(props.useTeam)}
+                className={cx(
+                  "inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[10px] font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
+                  props.teamLeadActive || props.useTeam
+                    ? "border-accent/30 bg-accent/10 text-accent"
+                    : "border-line bg-surface-muted text-ink-muted hover:text-ink",
+                )}
+              >
+                <Users className="size-3.5" />
+                {props.teamLeadActive ? "Team 运行中" : props.useTeam ? "Agent Team 已开启" : "Agent Team"}
+              </button>
+              <div className="text-[9px] text-ink-faint"><kbd className="rounded border border-line bg-surface-muted px-1 py-0.5 font-sans">Enter</kbd> 发送 · <kbd className="rounded border border-line bg-surface-muted px-1 py-0.5 font-sans">Shift Enter</kbd> 换行</div>
+            </div>
             {active ? (
               <button type="button" onClick={props.onCancel} disabled={props.cancelling || props.run?.status === "cancelling"} className="inline-flex h-9 items-center gap-2 rounded-xl border border-danger/20 bg-danger/5 px-3 text-xs font-medium text-danger transition hover:bg-danger/10 disabled:opacity-50">
                 {props.cancelling || props.run?.status === "cancelling" ? <><Spinner className="size-3.5 text-danger" /> 等待当前步骤结束</> : <><Square className="size-3.5 fill-current" /> 停止</>}

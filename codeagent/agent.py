@@ -7,6 +7,8 @@ call the model, execute requested tools, append tool results, repeat.
 from __future__ import annotations
 
 import time
+import math
+from contextlib import nullcontext
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,8 +23,10 @@ from codeagent.memory import MemoryManager
 from codeagent.messages import Message, ToolUse, extract_text, normalize_tool_uses
 from codeagent.prompts import PromptAssemblyResult, PromptMode, PromptRuntime
 from codeagent.planning import PlanningBackend
+from codeagent.permissions import WaitingPermissionBroker
 from codeagent.recovery import RecoveryRuntime
 from codeagent.runtime import CancellationToken
+from codeagent.runtime.activity import ExecutionActivity
 from codeagent.tracing import trace_run
 from codeagent.tools import (
     COMPACT_TOOL_NAME,
@@ -55,6 +59,7 @@ class AgentResult:
     stop_reason: str
     iterations: int
     usage: TokenTotals = field(default_factory=TokenTotals)
+    yielded: bool = False
 
 
 @dataclass(slots=True)
@@ -85,8 +90,13 @@ class Agent:
     skill_catalog: str = ""
     memory_catalog: str = ""
     history_observer: HistoryObserver = field(default_factory=HistoryObserver)
+    boundary_callback: Callable[[str], None] | None = None
+    execution_activity: ExecutionActivity | None = None
+    permission_broker: WaitingPermissionBroker | None = None
+    prompt_mode: PromptMode | None = None
     _compact_requested: bool = field(default=False, init=False)
     _tool_schema_changed: bool = field(default=False, init=False)
+    _yield_reason: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         task_tools = {"TaskCreate", "TaskGet", "TaskList", "TaskUpdate"}
@@ -125,10 +135,36 @@ class Agent:
     def add_user_message(self, content: Any) -> None:
         self.messages.append({"role": "user", "content": content})
 
+    def set_execution_activity(self, activity: ExecutionActivity) -> None:
+        """Bind one Team worker's monitor to main, retry and forked side calls."""
+        self.execution_activity = activity
+        assert self.recovery_runtime is not None
+        self.recovery_runtime.activity = activity
+        if self.permission_broker is not None:
+            self.permission_broker.execution_activity = activity
+        if isinstance(self.client, AnthropicModelClient):
+            self.client.activity = activity
+
     def run(self, prompt: str | None = None) -> AgentResult:
+        """Compatibility wrapper that runs a normal Agent to completion."""
+
+        return self._run(prompt, allow_yield=False)
+
+    def run_until_yield(self, prompt: str | None = None) -> AgentResult:
+        """Run a Team Agent until completion or a requested safe-boundary yield."""
+
+        return self._run(prompt, allow_yield=True)
+
+    def request_yield(self, reason: str = "waiting") -> None:
+        """Request a pause after the current model/tool boundary completes."""
+
+        self._yield_reason = str(reason).strip() or "waiting"
+
+    def _run(self, prompt: str | None, *, allow_yield: bool) -> AgentResult:
         """Run until the model stops requesting tools or the iteration limit hits."""
 
         self._check_cancelled()
+        memory_start = len(self.messages)
         assert self.event_emitter is not None
         assert self.usage_tracker is not None
         usage_before = self.usage_tracker.snapshot()
@@ -185,6 +221,36 @@ class Agent:
 
             while iterations < self.config.max_iterations:
                 self._check_cancelled()
+                if self.boundary_callback is not None:
+                    self.boundary_callback("before_model")
+                if allow_yield and self._yield_reason is not None:
+                    reason = self._yield_reason
+                    self._yield_reason = None
+                    result = self._make_result(
+                        final_text="",
+                        stop_reason=f"waiting:{reason}",
+                        iterations=iterations,
+                        usage_before=usage_before,
+                        yielded=True,
+                    )
+                    self.event_emitter.emit(
+                        "agent.waiting",
+                        {
+                            "reason": reason,
+                            "iterations": iterations,
+                            "message_count": len(self.messages),
+                            "usage": result.usage.to_dict(),
+                        },
+                    )
+                    run_trace.end(
+                        outputs={
+                            "stop_reason": result.stop_reason,
+                            "iterations": result.iterations,
+                            "message_count": len(result.messages),
+                            "yielded": True,
+                        }
+                    )
+                    return result
                 iterations += 1
                 self.messages = self.context.prepare_before_model_call(
                     self.messages,
@@ -249,7 +315,7 @@ class Agent:
                 if call_result.messages is not None:
                     self.messages = call_result.messages
                 if call_result.failed or call_result.response is None:
-                    self._after_turn_memory()
+                    self._after_turn_memory(memory_start)
                     result = self._make_result(
                         final_text=call_result.error,
                         stop_reason=f"recovery_failed:{call_result.reason}",
@@ -279,7 +345,7 @@ class Agent:
                 if response_recovery.messages is not None:
                     self.messages = response_recovery.messages
                 if response_recovery.failed:
-                    self._after_turn_memory()
+                    self._after_turn_memory(memory_start)
                     result = self._make_result(
                         final_text=response_recovery.error,
                         stop_reason=f"recovery_failed:{response_recovery.reason}",
@@ -308,7 +374,7 @@ class Agent:
                     if force_continue:
                         self.add_user_message(force_continue)
                         continue
-                    self._after_turn_memory()
+                    self._after_turn_memory(memory_start)
                     result = self._make_result(
                         final_text=extract_text(response.content),
                         stop_reason=response.stop_reason,
@@ -338,7 +404,7 @@ class Agent:
                         event_emitter=self.event_emitter,
                     )
 
-            self._after_turn_memory()
+            self._after_turn_memory(memory_start)
             result = self._make_result(
                 final_text="",
                 stop_reason=f"max_iterations:{last_stop_reason}",
@@ -406,7 +472,18 @@ class Agent:
                             "input": _public_tool_input(tool_use.name, tool_use.input),
                         },
                     )
-                    output = self.tools.execute(tool_use.name, tool_use.input)
+                    activity = self.execution_activity
+                    timeout = tool_use.input.get("timeout", 120)
+                    if not (
+                        isinstance(timeout, (int, float))
+                        and math.isfinite(timeout) and timeout > 0
+                    ):
+                        timeout = 120
+                    with (
+                        activity.operation("tool", activity.clock() + timeout + 5)
+                        if activity is not None else nullcontext()
+                    ):
+                        output = self.tools.execute(tool_use.name, tool_use.input)
                     self.context.record_tool_result(tool_use, output)
                     self.hooks.trigger("PostToolUse", tool_use, output)
                     failed = output.startswith(("Error:", "Unknown tool:"))
@@ -608,6 +685,8 @@ class Agent:
         )
 
     def _prompt_mode(self) -> PromptMode:
+        if self.prompt_mode is not None:
+            return self.prompt_mode
         return PromptMode.NORMAL if self.allow_subagents else PromptMode.SUBAGENT
 
     def _log_prompt_assembly(self, assembly: PromptAssemblyResult) -> None:
@@ -675,6 +754,7 @@ class Agent:
                 event_emitter=self.event_emitter,
                 usage_tracker=self.usage_tracker,
                 call_kind="context_summary",
+                activity=self.execution_activity,
             )
         fork = getattr(self.client, "fork", None)
         if callable(fork):
@@ -687,7 +767,7 @@ class Agent:
             )
         return self.client
 
-    def _after_turn_memory(self) -> None:
+    def _after_turn_memory(self, start_index: int = 0) -> None:
         if self.memory_manager is None:
             return
         try:
@@ -701,8 +781,11 @@ class Agent:
                     usage_tracker=self.usage_tracker,
                     call_kind="memory_maintenance",
                 )
+            current_run_messages = (
+                self.messages[start_index:] if start_index <= len(self.messages) else []
+            )
             self.memory_manager.after_turn(
-                self.messages,
+                current_run_messages,
                 client=memory_client,
                 model=self.config.model,
                 max_tokens=self.config.max_tokens,
@@ -718,6 +801,7 @@ class Agent:
         stop_reason: str,
         iterations: int,
         usage_before: TokenTotals,
+        yielded: bool = False,
     ) -> AgentResult:
         assert self.usage_tracker is not None
         return AgentResult(
@@ -726,6 +810,7 @@ class Agent:
             stop_reason=stop_reason,
             iterations=iterations,
             usage=self.usage_tracker.snapshot().delta(usage_before),
+            yielded=yielded,
         )
 
     def _emit_agent_terminal(self, event_type: str, result: AgentResult) -> None:

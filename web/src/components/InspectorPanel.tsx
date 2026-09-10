@@ -15,12 +15,13 @@ import {
   RefreshCcw,
   X,
 } from "lucide-react";
-import type { RuntimeConfig } from "@/types/api";
+import type { RuntimeConfig, TeamSnapshot } from "@/types/api";
 import type { TaskList, TaskResource } from "@/types/api";
 import type { RunViewState } from "@/store/runStore";
 import { cx, formatDuration, formatNumber, formatTime, isRunActive, prettyJson, statusLabel, tokenTotal } from "@/lib/utils";
 import { EmptyPanel, IconButton, StatusDot } from "@/components/ui";
 import { TaskPlan } from "@/components/TaskPlan";
+import { TeamPanel } from "@/components/TeamPanel";
 
 type Props = {
   run?: RunViewState;
@@ -33,22 +34,34 @@ type Props = {
   taskList?: TaskList;
   onContinueTask?: (task: TaskResource) => void;
   onCreateTask?: (input: { subject: string; description: string; activeForm?: string }) => void;
+  teamEnabled?: boolean;
+  team?: TeamSnapshot;
+  teamLoading?: boolean;
+  teamBusy?: boolean;
+  teamError?: string;
+  onTeamPlan?: (revision: number, decision: "approve" | "reject", reason: string) => void;
+  onCandidateApproval?: (candidateId: string, decision: "approve" | "reject", reason: string) => void;
+  onResumeAttempt?: (attemptId: string, reason: string, acknowledgeUnknownResult: boolean) => void;
+  onCancelTeam?: (reason: string) => void;
+  onVerifyIntegration?: (targetRef: string) => void;
+  onCleanupWorktree?: (worktreeId: string) => void;
 };
 
-export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], tasksLoading, taskBusy, taskList, onContinueTask, onCreateTask }: Props) {
-  const [tab, setTab] = useState<"run" | "tasks" | "debug">("tasks");
+export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], tasksLoading, taskBusy, taskList, onContinueTask, onCreateTask, teamEnabled = false, team, teamLoading, teamBusy, teamError, onTeamPlan, onCandidateApproval, onResumeAttempt, onCancelTeam, onVerifyIntegration, onCleanupWorktree }: Props) {
+  const [tab, setTab] = useState<"run" | "tasks" | "team" | "debug">("tasks");
   return (
     <aside className="flex h-full min-h-0 w-full flex-col border-l border-line bg-surface">
       <header className="flex h-16 shrink-0 items-center justify-between border-b border-line px-4">
         <div className="flex h-full items-end gap-5">
           <Tab active={tab === "run"} onClick={() => setTab("run")}>运行</Tab>
           <Tab active={tab === "tasks"} onClick={() => setTab("tasks")}>任务</Tab>
+          {teamEnabled && <Tab active={tab === "team"} onClick={() => setTab("team")}>团队</Tab>}
           <Tab active={tab === "debug"} onClick={() => setTab("debug")}>调试</Tab>
         </div>
         {mobile && onClose && <IconButton label="关闭运行面板" onClick={onClose}><X className="size-4" /></IconButton>}
       </header>
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
-        {tab === "run" ? <RunInspector run={run} runtime={runtime} /> : tab === "tasks" ? <TaskPlan tasks={tasks} loading={tasksLoading} busy={taskBusy} taskList={taskList} onContinue={onContinueTask ?? (() => undefined)} onCreate={onCreateTask ?? (() => undefined)} /> : <DebugInspector run={run} runtime={runtime} />}
+        {tab === "run" ? <RunInspector run={run} runtime={runtime} /> : tab === "tasks" ? <TaskPlan tasks={tasks} loading={tasksLoading} busy={taskBusy} taskList={taskList} onContinue={onContinueTask ?? (() => undefined)} onCreate={onCreateTask ?? (() => undefined)} /> : tab === "team" ? <TeamPanel enabled={teamEnabled} team={team} loading={teamLoading} busy={teamBusy} error={teamError} onTeamPlan={onTeamPlan ?? (() => undefined)} onCandidateApproval={onCandidateApproval ?? (() => undefined)} onResumeAttempt={onResumeAttempt ?? (() => undefined)} onCancel={onCancelTeam ?? (() => undefined)} onVerifyIntegration={onVerifyIntegration ?? (() => undefined)} onCleanupWorktree={onCleanupWorktree ?? (() => undefined)} /> : <DebugInspector run={run} runtime={runtime} />}
       </div>
     </aside>
   );

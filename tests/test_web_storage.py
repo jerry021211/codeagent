@@ -96,6 +96,32 @@ class SQLiteRepositoryTests(unittest.TestCase):
         finally:
             legacy.close()
 
+    def test_for_workspace_backs_up_legacy_database_outside_repository(self) -> None:
+        workspace = Path(self.temp_dir.name) / "project"
+        legacy_database = workspace / ".codeagent" / "state.db"
+        legacy = SQLiteRepository(legacy_database, recover_incomplete=False)
+        legacy.create_conversation(
+            title="Legacy external migration",
+            conversation_id="conv_legacy_external",
+            workspace=str(workspace),
+        )
+        legacy.close()
+        data_dir = Path(self.temp_dir.name) / "runtime-data"
+
+        migrated = SQLiteRepository.for_workspace(
+            workspace,
+            recover_incomplete=False,
+            data_dir=data_dir,
+        )
+        try:
+            self.assertEqual(Path(migrated.database), data_dir / "state" / "state.db")
+            self.assertIsNotNone(
+                migrated.get_conversation("conv_legacy_external")
+            )
+            self.assertTrue(legacy_database.exists())
+        finally:
+            migrated.close()
+
     def test_conversation_and_message_crud_round_trips_json(self) -> None:
         conversation = self.repository.create_conversation(title="Initial")
         updated = self.repository.update_conversation(

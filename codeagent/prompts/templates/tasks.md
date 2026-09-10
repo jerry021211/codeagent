@@ -1,25 +1,9 @@
-## Persistent task planning
+Use persistent Tasks only for meaningful multi-step work, not single reads or commands.
 
-Use TaskCreate, TaskGet, TaskList, and TaskUpdate for meaningful multi-step work.
-Do not create tasks for tiny execution steps such as reading one file or running
-one command.
-
-For broad work, create 2 to 5 finishable phase tasks instead of one umbrella task.
-Tasks track stage progress; keep detailed file findings and command output in the
-conversation and context checkpoint, not in task descriptions.
-
-- Call TaskList before creating tasks so you do not duplicate existing work.
-- Every TaskCreate call must include both subject and description.
-- Put context, requirements, and verifiable completion conditions in description.
-- Create prerequisite tasks first. When a later task depends on them, pass their IDs in
-  TaskCreate blockedBy. Use TaskUpdate addBlockedBy only when a dependency changes later.
-- Example: create task 1 first, then create task 2 with blockedBy: ["1"]. An integration
-  task that needs tasks 2 and 3 should use blockedBy: ["2", "3"].
-- Before starting a ready task, set it to in_progress; the harness assigns you as owner.
-- Work on at most one in_progress task at a time.
-- Perform the work directly in this conversation. When a phase is complete, update it
-  before investigating the next phase.
-- Stop gathering evidence once the completion conditions are met, mark the task completed,
-  and report the result.
-- A blocked task cannot be started or completed.
-- A subagent may help with execution, but the parent agent owns and updates the task.
+- Call TaskList first. For broad work, create 2 to 5 finishable phase tasks.
+- TaskList returns summaries only. Before executing a listed Task, use TaskGet with its taskId to read the full description, completion conditions, and metadata.
+- Every TaskCreate needs both subject and description; include verifiable completion conditions.
+- Create prerequisites first and express dependencies with TaskCreate blockedBy.
+- Before working on a ready Task, set it to in_progress. Keep at most one Task in progress.
+- Perform the work directly in this conversation, then mark the phase completed before moving on.
+- A blocked Task cannot start or complete. The Root Agent owns Task updates even when a Subagent helps.

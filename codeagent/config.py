@@ -14,6 +14,7 @@ from codeagent.memory import MemoryConfig
 from codeagent.planning import PlanningBackend
 from codeagent.prompts import PromptConfig
 from codeagent.recovery import RecoveryConfig
+from codeagent.runtime.data_paths import default_runtime_data_dir
 
 
 def _load_dotenv() -> None:
@@ -69,8 +70,14 @@ class EnvironmentConfig:
     memory_config: MemoryConfig = field(default_factory=MemoryConfig)
     prompt_config: PromptConfig = field(default_factory=PromptConfig)
     recovery_config: RecoveryConfig = field(default_factory=RecoveryConfig)
+    data_dir: Path = field(default_factory=default_runtime_data_dir)
     planning_mode: PlanningBackend = PlanningBackend.AUTO
     mcp_config_path: Path = Path("mcp.json")
+    team_runtime_enabled: bool = False
+    team_write_enabled: bool = False
+    team_worktree_root: Path = Path(".codeagent-worktrees")
+    team_model_response_timeout: float = 300.0
+    team_model_call_timeout: float = 600.0
 
     @classmethod
     def from_env(cls) -> "EnvironmentConfig":
@@ -161,10 +168,18 @@ class EnvironmentConfig:
                 side_query_max_retries=_int_env("RECOVERY_SIDE_QUERY_MAX_RETRIES", 2),
                 trace=_bool_env("RECOVERY_TRACE", False),
             ),
+            data_dir=Path(os.getenv("CODEAGENT_DATA_DIR") or default_runtime_data_dir()),
             planning_mode=PlanningBackend.parse(
                 os.getenv("CODEAGENT_PLANNING_MODE", "auto")
             ),
             mcp_config_path=Path(os.getenv("MCP_CONFIG", "mcp.json")),
+            team_runtime_enabled=_bool_env("TEAM_RUNTIME_ENABLED", False),
+            team_write_enabled=_bool_env("TEAM_WRITE_ENABLED", False),
+            team_model_response_timeout=_float_env("TEAM_MODEL_RESPONSE_TIMEOUT", 300.0),
+            team_model_call_timeout=_float_env("TEAM_MODEL_CALL_TIMEOUT", 600.0),
+            team_worktree_root=Path(
+                os.getenv("TEAM_WORKTREE_ROOT", ".codeagent-worktrees")
+            ),
         )
 
     def to_agent_config(

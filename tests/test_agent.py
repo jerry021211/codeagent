@@ -67,6 +67,45 @@ class SequenceClient:
 
 
 class AgentTests(unittest.TestCase):
+    def test_memory_maintenance_only_receives_messages_from_current_run(self) -> None:
+        class CapturingMemoryManager:
+            config = MemoryConfig(selection_mode="simple")
+
+            def __init__(self) -> None:
+                self.observed = []
+
+            def select_context(self, messages, **kwargs):
+                return ""
+
+            def after_turn(self, messages, **kwargs):
+                self.observed = deepcopy(messages)
+
+        manager = CapturingMemoryManager()
+        agent = Agent(
+            client=SequenceClient(
+                [
+                    ModelResponse(
+                        stop_reason="end_turn",
+                        content=[{"type": "text", "text": "ordinary result"}],
+                    )
+                ]
+            ),
+            tools=ToolRegistry(),
+            config=AgentConfig(model="fake-model"),
+            memory_manager=manager,
+            messages=[
+                {"role": "user", "content": "old Team request"},
+                {"role": "assistant", "content": "old Team candidate result"},
+            ],
+        )
+
+        agent.run("new ordinary request")
+
+        observed_text = repr(manager.observed)
+        self.assertIn("new ordinary request", observed_text)
+        self.assertIn("ordinary result", observed_text)
+        self.assertNotIn("old Team candidate result", observed_text)
+
     def test_legacy_conversation_gets_tool_change_notice(self) -> None:
         client = SequenceClient(
             [
@@ -91,7 +130,7 @@ class AgentTests(unittest.TestCase):
         agent.run("Try again")
 
         self.assertIn(
-            "registered tool set has changed since the previous turn",
+            "available tool schemas changed since the previous turn",
             client.calls[0]["system"],
         )
         self.assertTrue(state.tool_schema_hash)

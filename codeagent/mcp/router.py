@@ -40,8 +40,20 @@ class McpTool:
 class McpRouter:
     """Own MCP connections and expose their tools through ``ToolRegistry``."""
 
-    def __init__(self, config_path: str | Path = "mcp.json") -> None:
+    def __init__(
+        self,
+        config_path: str | Path = "mcp.json",
+        *,
+        workspace_root: str | Path | None = None,
+        force_workspace_cwd: bool = False,
+    ) -> None:
         self.servers = load_mcp_servers(config_path)
+        self.workspace_root = (
+            Path(workspace_root).resolve() if workspace_root is not None else None
+        )
+        self.force_workspace_cwd = bool(force_workspace_cwd)
+        if self.force_workspace_cwd and self.workspace_root is None:
+            raise ValueError("force_workspace_cwd requires workspace_root")
         self._clients: dict[str, Client] = {}
         self._tools: list[McpTool] = []
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -131,11 +143,16 @@ class McpRouter:
 
     async def _transport(self, server: McpServerConfig, stack: AsyncExitStack):
         if server.transport == "stdio":
+            cwd = (
+                str(self.workspace_root)
+                if self.force_workspace_cwd
+                else server.cwd
+            )
             params = StdioServerParameters(
                 command=_expand(server.command),
                 args=[_expand(item) for item in server.args],
                 env={key: _expand(value) for key, value in server.env.items()},
-                cwd=server.cwd,
+                cwd=cwd,
             )
             return stdio_client(params)
         if server.transport in {"http", "streamable-http"}:

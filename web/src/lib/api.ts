@@ -10,6 +10,9 @@ import type {
   RuntimeConfig,
   TaskList,
   TaskResource,
+  TeamSnapshot,
+  TeamChangesPage,
+  DatabaseChange,
   WorkspaceListing,
 } from "@/types/api";
 import { unwrapList } from "@/lib/utils";
@@ -108,10 +111,10 @@ export const api = {
     });
   },
 
-  createRun(conversationId: string, content: string) {
+  createRun(conversationId: string, content: string, useTeam = false) {
     return request<CreateRunResponse>(`/conversations/${encodeURIComponent(conversationId)}/runs`, {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, useTeam }),
     });
   },
 
@@ -158,5 +161,68 @@ export const api = {
 
   taskEventStreamUrl(taskListId: string) {
     return `${API_ROOT}/task-lists/${encodeURIComponent(taskListId)}/events`;
+  },
+
+  listTeams(conversationId: string) {
+    return request<TeamSnapshot[]>(`/teams?conversation_id=${encodeURIComponent(conversationId)}`);
+  },
+
+  getTeam(teamRunId: string) {
+    return request<TeamSnapshot>(`/teams/${encodeURIComponent(teamRunId)}`);
+  },
+
+  decideTeamPlan(teamRunId: string, revision: number, decision: "approve" | "reject", reason: string) {
+    return request<TeamSnapshot>(`/teams/${encodeURIComponent(teamRunId)}/plans/${revision}/decision`, {
+      method: "POST",
+      body: JSON.stringify({ decision, reason, commandId: crypto.randomUUID() }),
+    });
+  },
+
+  approveCandidate(teamRunId: string, candidateId: string, decision: "approve" | "reject", reason: string) {
+    return request<{ candidate: unknown; team: TeamSnapshot }>(`/teams/${encodeURIComponent(teamRunId)}/candidates/${encodeURIComponent(candidateId)}/approval`, {
+      method: "POST",
+      body: JSON.stringify({ decision, reason, commandId: crypto.randomUUID() }),
+    });
+  },
+
+  cancelTeam(teamRunId: string, reason: string) {
+    return request<TeamSnapshot>(`/teams/${encodeURIComponent(teamRunId)}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ reason, commandId: crypto.randomUUID() }),
+    });
+  },
+
+  resumeAttempt(teamRunId: string, attemptId: string, reason: string, acknowledgeUnknownResult: boolean) {
+    return request<TeamSnapshot>(`/teams/${encodeURIComponent(teamRunId)}/attempts/${encodeURIComponent(attemptId)}/resume`, {
+      method: "POST",
+      body: JSON.stringify({ reason, acknowledgeUnknownResult, commandId: crypto.randomUUID() }),
+    });
+  },
+
+  verifyManualIntegration(teamRunId: string, targetRef: string) {
+    return request<{ check: Record<string, unknown>; team: TeamSnapshot }>(`/teams/${encodeURIComponent(teamRunId)}/manual-integration`, {
+      method: "POST",
+      body: JSON.stringify({ targetRef, commandId: crypto.randomUUID() }),
+    });
+  },
+
+  disposeWorktree(teamRunId: string, worktreeId: string, action: "retain" | "cleanup") {
+    return request<TeamSnapshot["worktrees"][number]>(`/teams/${encodeURIComponent(teamRunId)}/worktrees/${encodeURIComponent(worktreeId)}/disposition`, {
+      method: "POST",
+      body: JSON.stringify({ action, commandId: crypto.randomUUID() }),
+    });
+  },
+
+  teamEventStreamUrl(teamRunId: string) {
+    return `${API_ROOT}/teams/${encodeURIComponent(teamRunId)}/events`;
+  },
+  getTeamChanges(teamRunId: string, after = 0, table = "") {
+    const query = new URLSearchParams({ after: String(after), limit: "100" });
+    if (table) query.set("table", table);
+    return request<TeamChangesPage>(`/teams/${encodeURIComponent(teamRunId)}/changes?${query}`);
+  },
+
+  getTeamChange(teamRunId: string, sequence: number) {
+    return request<DatabaseChange>(`/teams/${encodeURIComponent(teamRunId)}/changes/${sequence}`);
   },
 };

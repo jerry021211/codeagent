@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
@@ -11,6 +12,8 @@ from codeagent.events import EventEmitter, TokenUsage, UsageTracker
 from codeagent.messages import Message
 from codeagent.models import ModelResponse
 from codeagent.tracing import trace_run
+from codeagent.runtime.activity import ExecutionActivity
+from codeagent.runtime.cancellation import CancelledError
 
 
 @dataclass(slots=True)
@@ -25,6 +28,7 @@ class AnthropicModelClient:
     usage_tracker: UsageTracker | None = None
     call_kind: str = "main"
     sdk_client: Any | None = None
+    activity: ExecutionActivity | None = None
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -86,29 +90,47 @@ class AnthropicModelClient:
                 "base_url": self.base_url,
                 "tool_count": len(tools),
             },
-        ) as llm_trace:
+        ) as llm_trace, (
+            self.activity.model_request() if self.activity is not None else nullcontext()
+        ):
             try:
+                # Per-request options do not mutate/close the shared SDK client.
+                client = self._client
+                if self.activity is not None:
+                    client = client.with_options(
+                        max_retries=0, timeout=self.activity.request_timeout()
+                    )
                 if self.stream:
-                    response = self._create_streaming_message(params, call_id=call_id)
+                    response = self._create_streaming_message(params, call_id=call_id, client=client)
                 else:
                     response = self._message_to_response(
-                        self._client.messages.create(**params),
+                        client.messages.create(**params),
                         model=model,
                         call_kind=self.call_kind,
                     )
+                if self.activity is not None:
+                    self.activity.check()
             except Exception as exc:
+                error = exc
+                if self.activity is not None:
+                    try:
+                        self.activity.check()
+                    except CancelledError as cancellation:
+                        # Closing an expired stream may surface as an I/O error.
+                        # Persist the Runtime reason instead of a misleading network failure.
+                        error = cancellation
                 self._emit(
                     "model.failed",
                     {
                         "call_id": call_id,
                         "model": model,
                         "call_kind": self.call_kind,
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
+                        "error_type": type(error).__name__,
+                        "error": str(error),
                         "duration_ms": round((time.monotonic() - started_at) * 1000),
                     },
                 )
-                raise
+                raise error
             if self.usage_tracker is not None:
                 self.usage_tracker.record(response.usage)
             usage_payload = response.usage.to_dict() if response.usage is not None else None
@@ -159,6 +181,7 @@ class AnthropicModelClient:
             ),
             call_kind=self.call_kind if call_kind is None else call_kind,
             sdk_client=self._client,
+            activity=self.activity,
         )
 
     def _create_streaming_message(
@@ -166,20 +189,46 @@ class AnthropicModelClient:
         params: dict[str, Any],
         *,
         call_id: str,
+        client: Any,
     ) -> ModelResponse:
-        with self._client.messages.stream(**params) as stream:
-            for text in stream.text_stream:
-                if self.on_text is not None:
-                    self.on_text(text)
-                self._emit(
-                    "model.text_delta",
-                    {"call_id": call_id, "text": text, "call_kind": self.call_kind},
-                )
+        with client.messages.stream(**params) as stream:
+            if self.activity is None:
+                for text in stream.text_stream:
+                    self._emit_text(text, call_id)
+            else:
+                self.activity.set_request_closer(stream.close)
+                try:
+                    for event in stream:
+                        self.activity.check()
+                        if _field(event, "type") != "content_block_delta":
+                            continue
+                        delta = _field(event, "delta")
+                        kind = _field(delta, "type")
+                        # Do not mistake SDK convenience events or keepalives for
+                        # new content. Thinking is activity, not UI-visible text.
+                        content = _field(delta, {
+                            "text_delta": "text", "thinking_delta": "thinking",
+                            "input_json_delta": "partial_json",
+                        }.get(kind, ""))
+                        if content:
+                            self.activity.touch(response=True)
+                        if kind == "text_delta" and content:
+                            self._emit_text(content, call_id)
+                finally:
+                    self.activity.set_request_closer(None)
+                self.activity.check()
             return self._message_to_response(
                 stream.get_final_message(),
                 model=str(params.get("model") or ""),
                 call_kind=self.call_kind,
             )
+
+    def _emit_text(self, text: str, call_id: str) -> None:
+        if self.on_text is not None:
+            self.on_text(text)
+        self._emit("model.text_delta", {
+            "call_id": call_id, "text": text, "call_kind": self.call_kind,
+        })
 
     @staticmethod
     def _message_to_response(

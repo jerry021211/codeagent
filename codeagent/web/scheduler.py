@@ -15,7 +15,16 @@ from codeagent.events import (
     RecordingEventSink,
 )
 from codeagent.permissions import PermissionRequest, WaitingPermissionBroker
+from codeagent.prompts import PromptMode
 from codeagent.runtime import CancellationToken, CancelledError
+from codeagent.runtime.activity import ExecutionActivity
+from codeagent.runtime.cancellation import ModelCallTimeout
+from codeagent.teams import (
+    AgentSessionRunner,
+    AgentSessionState,
+    MessageBus,
+    TeamAgentRole,
+)
 from codeagent.web.factory import serialize_runtime_state
 from codeagent.web.models import ApprovalRecord, RunRecord
 from codeagent.web.storage import (
@@ -35,6 +44,7 @@ class AgentFactory(Protocol):
         cancellation: CancellationToken,
         permission_broker: WaitingPermissionBroker,
         checkpoint: Any | None = None,
+        root_prompt_mode: PromptMode | None = None,
     ) -> Any: ...
 
 
@@ -44,6 +54,7 @@ class _RunJob:
     conversation_id: str
     workspace: str
     prompt: str
+    use_team: bool
     emitter: EventEmitter
     cancellation: CancellationToken
     broker: WaitingPermissionBroker
@@ -64,6 +75,10 @@ class RunScheduler:
         self.approval_timeout = approval_timeout
         self._jobs: queue.Queue[_RunJob | None] = queue.Queue()
         self._controls: dict[str, _RunJob] = {}
+        self._team_approval_brokers: dict[str, WaitingPermissionBroker] = {}
+        self._team_worktrees: Any | None = None
+        self._lead_locks: dict[str, threading.Lock] = {}
+        self._lead_activities: dict[str, ExecutionActivity] = {}
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
@@ -111,7 +126,9 @@ class RunScheduler:
         if callable(close_factory):
             close_factory()
 
-    def submit(self, conversation_id: str, content: str) -> RunRecord:
+    def submit(
+        self, conversation_id: str, content: str, *, use_team: bool = False
+    ) -> RunRecord:
         prompt = str(content).strip()
         if not prompt:
             raise ValueError("Message content cannot be empty")
@@ -123,7 +140,18 @@ class RunScheduler:
                 conversation_id,
                 title=_conversation_title(prompt),
             )
-        run = self.repository.create_run(conversation_id)
+        requested_mode = "team" if use_team else "single"
+        run = self.repository.create_run(
+            conversation_id,
+            metadata={
+                "requested_mode": requested_mode,
+                "agent_profile": (
+                    PromptMode.TEAM_PLANNER.value
+                    if use_team
+                    else PromptMode.NORMAL.value
+                ),
+            },
+        )
         self.repository.create_message(
             conversation_id,
             role="user",
@@ -185,6 +213,7 @@ class RunScheduler:
             conversation_id=conversation_id,
             workspace=conversation.workspace,
             prompt=prompt,
+            use_team=bool(use_team),
             emitter=emitter,
             cancellation=cancellation,
             broker=broker,
@@ -205,6 +234,11 @@ class RunScheduler:
             return False
         reload_factory(workspace)
         return True
+
+    def configure_team_runtime(self, worktree_manager: Any) -> None:
+        """Attach the Runtime-owned Worktree registry used by Team Agents."""
+
+        self._team_worktrees = worktree_manager
 
     def cancel(self, run_id: str) -> RunRecord:
         run = self.repository.request_run_cancel(run_id)
@@ -244,7 +278,351 @@ class RunScheduler:
                     "tool_name": resolved.tool_name,
                 },
             )
+        else:
+            with self._lock:
+                broker = self._team_approval_brokers.pop(approval_id, None)
+            if broker is not None:
+                broker.resolve(approval_id, decision == "allow")
         return resolved
+
+    def create_team_agent(
+        self,
+        session: Any,
+        attempt: Any,
+        cancellation: CancellationToken,
+        worktree_manager: Any,
+    ) -> Any:
+        """Build one independent Teammate Agent rooted at its bound Worktree."""
+
+        team = self.repository.get_team_run(attempt.team_run_id)
+        if team is None:
+            raise RecordNotFoundError(f"TeamRun not found: {attempt.team_run_id}")
+        conversation = self.repository.get_conversation(team.conversation_id)
+        if conversation is None:
+            raise RecordNotFoundError(
+                f"Conversation not found: {team.conversation_id}"
+            )
+        task = self.repository.get_task_resource(attempt.task_list_id, attempt.task_id)
+        task_kind = str(task.task.metadata.get("kind") or "analysis").lower()
+        binding = self.repository.get_attempt_worktree_binding(attempt.id)
+        if task_kind == "code":
+            if binding is None:
+                raise RuntimeError("Code Teammate has no Worktree binding")
+            binding = worktree_manager.validate_binding(binding.id)
+            execution_workspace = binding.path
+        else:
+            if binding is not None:
+                raise RuntimeError("Analysis Teammate must not have a Worktree binding")
+            execution_workspace = conversation.workspace
+        emitter = EventEmitter(
+            RecordingEventSink(self.repository),
+            context=ExecutionContext(
+                conversation_id=team.conversation_id,
+                run_id=team.root_run_id,
+                turn_id=f"teamturn_{uuid4().hex}",
+                agent_id=attempt.agent_id,
+                parent_agent_id=team.lead_agent_id,
+            ),
+        )
+
+        def on_permission(request: PermissionRequest) -> None:
+            public_input = _public_approval_input(request.tool_name, request.tool_input)
+            persisted = self.repository.create_approval(
+                team.root_run_id,
+                approval_id=request.id,
+                tool_name=request.tool_name,
+                tool_input=public_input,
+                reason=request.reason,
+                expires_at=_approval_expiry(request.timeout),
+            )
+            with self._lock:
+                self._team_approval_brokers[persisted.id] = broker
+            emitter.emit(
+                "approval.requested",
+                {
+                    "approval_id": persisted.id,
+                    "tool_name": persisted.tool_name,
+                    "input": public_input,
+                    "reason": persisted.reason,
+                    "summary": _approval_summary(
+                        persisted.tool_name, persisted.tool_input
+                    ),
+                    "team_run_id": team.id,
+                    "attempt_id": attempt.id,
+                },
+            )
+
+        def on_timeout(request: PermissionRequest) -> None:
+            with self._lock:
+                self._team_approval_brokers.pop(request.id, None)
+            approval = self.repository.get_approval(request.id)
+            if approval is not None and approval.status == "pending":
+                self.repository.expire_pending_approvals(approval_id=request.id)
+            emitter.emit(
+                "approval.expired",
+                {
+                    "approval_id": request.id,
+                    "tool_name": request.tool_name,
+                    "team_run_id": team.id,
+                    "attempt_id": attempt.id,
+                },
+            )
+
+        broker = WaitingPermissionBroker(
+            default_timeout=self.approval_timeout,
+            on_request=on_permission,
+            on_timeout=on_timeout,
+        )
+        team_factory_method = getattr(self.agent_factory, "for_team_workspace", None)
+        if callable(team_factory_method):
+            workspace_factory = team_factory_method(
+                execution_workspace,
+                project_workspace=conversation.workspace,
+            )
+        else:
+            factory_method = getattr(self.agent_factory, "for_workspace", None)
+            workspace_factory = (
+                factory_method(execution_workspace)
+                if callable(factory_method)
+                else self.agent_factory
+            )
+        return workspace_factory.create(
+            event_emitter=emitter,
+            cancellation=cancellation,
+            permission_broker=broker,
+            checkpoint=None,
+            team_session=session,
+            team_attempt=attempt,
+            worktree_manager=worktree_manager,
+        )
+
+    def team_lead_activities(self) -> tuple[ExecutionActivity, ...]:
+        """Expose active foreground Lead calls to the existing Team watchdog."""
+        with self._lock:
+            return tuple(self._lead_activities.values())
+
+    def run_team_lead_cycle(
+        self,
+        team_run_id: str,
+        *,
+        run_id: str | None = None,
+        cancellation: CancellationToken | None = None,
+        execution_activity: ExecutionActivity | None = None,
+    ) -> Any:
+        """Run one serialized Root/Lead turn from its durable Team inbox."""
+
+        if self._team_worktrees is None:
+            raise RuntimeError("Team Worktree registry is not configured")
+        team = self.repository.get_team_run(team_run_id)
+        if team is None:
+            raise RecordNotFoundError(f"TeamRun not found: {team_run_id}")
+        conversation = self.repository.get_conversation(team.conversation_id)
+        if conversation is None:
+            raise RecordNotFoundError(f"Conversation not found: {team.conversation_id}")
+        sessions = [
+            session
+            for session in self.repository.list_agent_sessions(
+                team.id, role=TeamAgentRole.LEAD.value
+            )
+            if session.state
+            not in {
+                AgentSessionState.FAILED,
+                AgentSessionState.LOST,
+                AgentSessionState.SHUTDOWN,
+            }
+        ]
+        if len(sessions) != 1:
+            raise RuntimeError("TeamRun must have exactly one active Lead Session")
+        session = sessions[0]
+        with self._lock:
+            lead_lock = self._lead_locks.setdefault(team.id, threading.Lock())
+        with lead_lock:
+            session = self.repository.get_agent_session(session.id)
+            if session.state in {
+                AgentSessionState.FAILED,
+                AgentSessionState.LOST,
+                AgentSessionState.SHUTDOWN,
+            }:
+                raise RuntimeError(f"Lead Session is terminal: {session.state.value}")
+            if session.state is not AgentSessionState.WORK:
+                session = self.repository.transition_agent_session(
+                    session.id, AgentSessionState.WORK.value
+                )
+            all_pending = self.repository.fetch_unacked_team_messages(session.id)
+            pending = [
+                message
+                for message in all_pending
+                if message.type != "USER_INSTRUCTION"
+                or (
+                    run_id is not None
+                    and str(message.payload.get("run_id") or "") == run_id
+                )
+            ]
+            if not pending:
+                self.repository.transition_agent_session(
+                    session.id, AgentSessionState.IDLE.value
+                )
+                return None
+            token = cancellation or CancellationToken()
+            emitter = EventEmitter(
+                RecordingEventSink(self.repository),
+                context=ExecutionContext(
+                    conversation_id=team.conversation_id,
+                    run_id=run_id or team.root_run_id,
+                    turn_id=f"leadturn_{uuid4().hex}",
+                    agent_id=team.lead_agent_id,
+                ),
+            )
+            factory_method = getattr(self.agent_factory, "for_workspace", None)
+            workspace_factory = (
+                factory_method(conversation.workspace)
+                if callable(factory_method)
+                else self.agent_factory
+            )
+            agent = workspace_factory.create(
+                event_emitter=emitter,
+                cancellation=token,
+                permission_broker=WaitingPermissionBroker(
+                    default_timeout=self.approval_timeout
+                ),
+                checkpoint=None,
+                team_session=session,
+                worktree_manager=self._team_worktrees,
+            )
+            activity = execution_activity or agent.execution_activity or ExecutionActivity(token)
+            agent.set_execution_activity(activity)
+            with self._lock:
+                self._lead_activities[team.id] = activity
+            try:
+                result = AgentSessionRunner(self.repository).run(
+                    agent, session.id,
+                    included_message_ids=frozenset(message.id for message in pending),
+                )
+            except ModelCallTimeout as exc:
+                self.repository.transition_agent_session(
+                    session.id, AgentSessionState.WAITING.value,
+                    waiting_reason=exc.reason_code,
+                )
+                raise
+            finally:
+                with self._lock:
+                    self._lead_activities.pop(team.id, None)
+            unresolved = _unresolved_lead_actions(self.repository, team.id, pending)
+            if unresolved:
+                reason = "Lead did not persist required decision(s): " + ", ".join(
+                    unresolved
+                )
+                self.repository.transition_agent_session(
+                    session.id,
+                    AgentSessionState.WAITING.value,
+                    waiting_reason="lead_decision_not_recorded",
+                )
+                result.stop_reason = "runtime_contract:lead_decision_not_recorded"
+                result.final_text = "\n\n".join(
+                    item for item in (result.final_text, f"Runtime: {reason}") if item
+                )
+            return result
+
+    def _execute_team_lead(self, job: _RunJob, team: Any) -> None:
+        lead_profile = (
+            PromptMode.TEAM_PLANNER
+            if getattr(team.state, "value", team.state) == "planning"
+            else PromptMode.TEAM_LEAD
+        )
+        job.emitter.emit(
+            "agent.profile.selected",
+            {
+                "profile": lead_profile.value,
+                "requested_mode": "active_team",
+                "team_run_id": team.id,
+            },
+        )
+        sessions = [
+            session
+            for session in self.repository.list_agent_sessions(
+                team.id, role=TeamAgentRole.LEAD.value
+            )
+            if session.state
+            not in {
+                AgentSessionState.FAILED,
+                AgentSessionState.LOST,
+                AgentSessionState.SHUTDOWN,
+            }
+        ]
+        if len(sessions) != 1:
+            raise RuntimeError("TeamRun must have exactly one active Lead Session")
+        session = sessions[0]
+        MessageBus(self.repository).send(
+            team.id,
+            sender_type="runtime",
+            recipient_type="lead",
+            recipient_agent_id=team.lead_agent_id,
+            recipient_generation=session.generation,
+            message_type="USER_INSTRUCTION",
+            payload={"content": job.prompt, "run_id": job.run_id},
+            dedupe_key=f"user-instruction:{job.run_id}",
+            priority="control",
+        )
+        result = self.run_team_lead_cycle(
+            team.id, run_id=job.run_id, cancellation=job.cancellation
+        )
+        if result is None:
+            raise RuntimeError("Lead USER_INSTRUCTION was not available to its Session")
+        job.cancellation.raise_if_cancelled()
+        terminal_status = (
+            "failed"
+            if result.stop_reason.startswith(
+                ("recovery_failed", "max_iterations", "runtime_contract")
+            )
+            else "completed"
+        )
+        if result.final_text:
+            self.repository.create_message(
+                job.conversation_id,
+                role="assistant",
+                content=result.final_text,
+                run_id=job.run_id,
+                metadata={
+                    "status": "complete" if terminal_status == "completed" else "failed",
+                    "team_run_id": team.id,
+                    "agent_role": "lead",
+                },
+            )
+            job.emitter.emit(
+                "message.completed",
+                {
+                    "role": "assistant",
+                    "content": result.final_text,
+                    "chars": len(result.final_text),
+                    "team_run_id": team.id,
+                    "agent_role": "lead",
+                },
+            )
+        current_run = self.repository.get_run(job.run_id)
+        self.repository.update_run_status(
+            job.run_id,
+            terminal_status,
+            error=result.final_text if terminal_status == "failed" else None,
+            metadata={
+                **(current_run.metadata if current_run is not None else {}),
+                "stop_reason": result.stop_reason,
+                "usage": result.usage.to_dict(),
+                "team_run_id": team.id,
+                "agent_role": "lead",
+                "agent_profile": lead_profile.value,
+            },
+        )
+        job.emitter.emit(
+            "run.completed" if terminal_status == "completed" else "run.failed",
+            {
+                "status": terminal_status,
+                "stop_reason": result.stop_reason,
+                "usage": result.usage.to_dict(),
+                "modified_files": [],
+                "team_run_id": team.id,
+                "agent_role": "lead",
+            },
+        )
 
     def _worker(self) -> None:
         while True:
@@ -282,6 +660,12 @@ class RunScheduler:
         try:
             self.repository.start_run(job.run_id)
             job.emitter.emit("run.started", {"status": "running"})
+            active_team = self.repository.get_active_team_run_for_conversation(
+                job.conversation_id
+            )
+            if active_team is not None:
+                self._execute_team_lead(job, active_team)
+                return
             checkpoint = self.repository.get_latest_checkpoint(job.conversation_id)
             factory_method = getattr(self.agent_factory, "for_workspace", None)
             workspace_factory = (
@@ -289,23 +673,57 @@ class RunScheduler:
                 if job.workspace and callable(factory_method)
                 else self.agent_factory
             )
-            agent = workspace_factory.create(
-                event_emitter=job.emitter,
-                cancellation=job.cancellation,
-                permission_broker=job.broker,
-                checkpoint=checkpoint,
+            profile = (
+                PromptMode.TEAM_PLANNER
+                if job.use_team
+                else PromptMode.NORMAL
             )
+            job.emitter.emit(
+                "agent.profile.selected",
+                {
+                    "profile": profile.value,
+                    "requested_mode": "team" if job.use_team else "single",
+                },
+            )
+            create_kwargs = {
+                "event_emitter": job.emitter,
+                "cancellation": job.cancellation,
+                "permission_broker": job.broker,
+                "checkpoint": checkpoint,
+            }
+            if job.use_team:
+                create_kwargs["root_prompt_mode"] = profile
+            agent = workspace_factory.create(**create_kwargs)
             result = agent.run(job.prompt)
             job.cancellation.raise_if_cancelled()
             terminal_status = (
                 "failed" if result.stop_reason.startswith(("recovery_failed", "max_iterations"))
                 else "completed"
             )
-            if result.final_text:
+            active_team = self.repository.get_active_team_run_for_conversation(
+                job.conversation_id
+            )
+            contract_error = None
+            if job.use_team and active_team is None:
+                terminal_status = "failed"
+                contract_error = (
+                    "Explicit Team mode ended without submitting a Team Plan. "
+                    "No TeamRun, Attempt, or Worktree was created."
+                )
+                job.emitter.emit(
+                    "team.plan.not_submitted",
+                    {"status": "failed", "reason": contract_error},
+                )
+            final_text = result.final_text
+            if contract_error:
+                final_text = "\n\n".join(
+                    item for item in (result.final_text, f"Runtime: {contract_error}") if item
+                )
+            if final_text:
                 self.repository.create_message(
                     job.conversation_id,
                     role="assistant",
-                    content=result.final_text,
+                    content=final_text,
                     run_id=job.run_id,
                     metadata={"status": "complete" if terminal_status == "completed" else "failed"},
                 )
@@ -313,16 +731,25 @@ class RunScheduler:
                     "message.completed",
                     {
                         "role": "assistant",
-                        "content": result.final_text,
-                        "chars": len(result.final_text),
+                        "content": final_text,
+                        "chars": len(final_text),
                     },
                 )
             self._finish(
                 job,
                 agent,
                 terminal_status,
-                error=(result.final_text if terminal_status == "failed" else None),
-                metadata={"stop_reason": result.stop_reason, "usage": result.usage.to_dict()},
+                error=(final_text if terminal_status == "failed" else None),
+                metadata={
+                    **current.metadata,
+                    "stop_reason": result.stop_reason,
+                    "usage": result.usage.to_dict(),
+                    **(
+                        {"team_run_id": active_team.id}
+                        if active_team is not None
+                        else {}
+                    ),
+                },
             )
             job.emitter.emit(
                 "run.completed" if terminal_status == "completed" else "run.failed",
@@ -333,6 +760,10 @@ class RunScheduler:
                     "modified_files": list(agent.context.state.files_changed),
                 },
             )
+        except ModelCallTimeout as exc:
+            error = {"type": exc.reason_code, "message": exc.reason}
+            self.repository.update_run_status(job.run_id, "failed", error=error)
+            job.emitter.emit("run.failed", {"status": "failed", "error": error})
         except CancelledError as exc:
             latest = self.repository.get_run(job.run_id)
             if latest is not None and latest.status not in {"cancelled", "completed", "failed", "interrupted"}:
@@ -385,6 +816,35 @@ def _approval_summary(tool_name: str, tool_input: dict[str, Any]) -> str:
         return str(tool_input.get("command") or "执行命令")
     path = tool_input.get("file_path") or tool_input.get("path")
     return f"{tool_name}: {path}" if path else tool_name
+
+
+def _unresolved_lead_actions(
+    repository: Any, team_run_id: str, messages: list[Any]
+) -> list[str]:
+    unresolved: list[str] = []
+    team_messages = None
+    for message in messages:
+        if message.type == "ATTEMPT_PLAN_SUBMITTED" and message.attempt_id:
+            revision = int(message.payload.get("attempt_plan_revision") or 0)
+            plans = repository.list_attempt_plans(message.attempt_id)
+            plan = next((item for item in plans if item.revision == revision), None)
+            if plan is not None and plan.status.value == "submitted":
+                unresolved.append(f"Attempt {message.attempt_id} plan p{revision}")
+        elif message.type == "CANDIDATE_SUBMITTED":
+            candidate_id = str(message.payload.get("candidate_id") or "")
+            if candidate_id:
+                candidate = repository.get_candidate(candidate_id)
+                if candidate.status.value == "submitted":
+                    unresolved.append(f"Candidate {candidate_id}")
+        elif message.type == "QUESTION":
+            if team_messages is None:
+                team_messages = repository.list_team_messages(team_run_id)
+            if not any(
+                item.type == "ANSWER" and item.correlation_id == message.id
+                for item in team_messages
+            ):
+                unresolved.append(f"Question {message.id}")
+    return unresolved
 
 
 def _conversation_title(prompt: str, limit: int = 36) -> str:

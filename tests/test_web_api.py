@@ -24,7 +24,7 @@ class FakeScheduler:
         self.repository = repository
         self.started = False
         self.stopped = False
-        self.submissions: list[tuple[str, str]] = []
+        self.submissions: list[tuple[str, str, bool]] = []
         self.mcp_reloads: list[str] = []
 
     def start(self) -> None:
@@ -33,8 +33,8 @@ class FakeScheduler:
     def stop(self) -> None:
         self.stopped = True
 
-    def submit(self, conversation_id: str, content: str):
-        self.submissions.append((conversation_id, content))
+    def submit(self, conversation_id: str, content: str, *, use_team: bool = False):
+        self.submissions.append((conversation_id, content, use_team))
         run = self.repository.create_run(conversation_id)
         self.repository.create_message(
             conversation_id,
@@ -103,6 +103,9 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(body["workspace"], str(self.workspace.resolve()))
         self.assertEqual(body["max_tokens"], 4096)
         self.assertTrue(body["features"]["sse"])
+        self.assertFalse(body["features"]["agent_team"])
+        disabled = self.client.get("/api/teams")
+        self.assertEqual(disabled.status_code, 503)
 
     def test_task_event_endpoint_returns_sse_stream(self) -> None:
         created = self.client.post(
@@ -161,6 +164,16 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertEqual(run.status_code, 202)
         self.assertEqual(run.json()["status"], "queued")
+        self.assertEqual(
+            self.scheduler.submissions[-1],
+            (conversation_id, "Implement the feature", False),
+        )
+
+        team_disabled = self.client.post(
+            f"/api/conversations/{conversation_id}/runs",
+            json={"content": "Use a team", "useTeam": True},
+        )
+        self.assertEqual(team_disabled.status_code, 409)
 
         messages = self.client.get(
             f"/api/conversations/{conversation_id}/messages"

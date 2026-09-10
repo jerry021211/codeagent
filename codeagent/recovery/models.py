@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable
+from typing import Callable
 
 from codeagent.messages import Message
 from codeagent.models import ModelResponse
@@ -71,6 +71,8 @@ class RecoveryState:
     fallback_used: bool = False
     last_reason: RecoveryReason | None = None
     last_error: str = ""
+    # One logical response, including retries and max-token regeneration.
+    model_deadline: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 
+from codeagent.memory.access import MemoryAccessPolicy
 from codeagent.memory.models import MEMORY_TYPES, MemoryRecord
 
 INDEX_FILE_NAME = "MEMORY.md"
@@ -21,9 +24,19 @@ class MemoryStore:
         root: Path | str = ".memory",
         *,
         max_memory_bytes: int = 50_000,
+        access_policy: MemoryAccessPolicy | None = None,
     ) -> None:
         self.root = Path(root)
         self.max_memory_bytes = max_memory_bytes
+        self.access_policy = access_policy
+
+    @contextmanager
+    def writing(self) -> Iterator[None]:
+        if self.access_policy is None:
+            yield
+            return
+        with self.access_policy.writing():
+            yield
 
     def list_memories(self) -> list[MemoryRecord]:
         if not self.root.exists():
@@ -47,32 +60,33 @@ class MemoryStore:
         memory_type: str = "project",
         source: str = "manual",
     ) -> MemoryRecord:
-        clean_name = self._clean_required("name", name)
-        clean_description = self._clean_required("description", description)
-        clean_content = self._clip_content(self._clean_required("content", content))
-        clean_type = self._clean_type(memory_type)
-        clean_source = source.strip() or "manual"
-        now = _now_iso()
+        with self.writing():
+            clean_name = self._clean_required("name", name)
+            clean_description = self._clean_required("description", description)
+            clean_content = self._clip_content(self._clean_required("content", content))
+            clean_type = self._clean_type(memory_type)
+            clean_source = source.strip() or "manual"
+            now = _now_iso()
 
-        existing = self._load_by_slug(self._slug(clean_name))
-        created_at = existing.created_at if existing is not None else now
-        record = MemoryRecord(
-            name=clean_name,
-            description=clean_description,
-            content=clean_content,
-            memory_type=clean_type,
-            source=clean_source,
-            created_at=created_at,
-            updated_at=now,
-            filename=self._filename_for_name(clean_name),
-        )
-        self.root.mkdir(parents=True, exist_ok=True)
-        self._path_for_name(clean_name).write_text(
-            self._serialize(record),
-            encoding="utf-8",
-        )
-        self.rebuild_index()
-        return record
+            existing = self._load_by_slug(self._slug(clean_name))
+            created_at = existing.created_at if existing is not None else now
+            record = MemoryRecord(
+                name=clean_name,
+                description=clean_description,
+                content=clean_content,
+                memory_type=clean_type,
+                source=clean_source,
+                created_at=created_at,
+                updated_at=now,
+                filename=self._filename_for_name(clean_name),
+            )
+            self.root.mkdir(parents=True, exist_ok=True)
+            self._path_for_name(clean_name).write_text(
+                self._serialize(record),
+                encoding="utf-8",
+            )
+            self.rebuild_index()
+            return record
 
     def load(self, name: str) -> MemoryRecord:
         slug = self._slug(self._clean_required("name", name))
@@ -130,38 +144,41 @@ class MemoryStore:
         return "\n".join(lines)
 
     def rebuild_index(self) -> None:
-        records = self.list_memories()
-        self.root.mkdir(parents=True, exist_ok=True)
-        lines = [
-            "# Memory Index",
-            "",
-            "This file is generated from markdown memory entries.",
-            "",
-        ]
-        if not records:
-            lines.append("_No memories stored yet._")
-        else:
+        with self.writing():
+            records = self.list_memories()
+            if not records:
+                return
+            self.root.mkdir(parents=True, exist_ok=True)
+            lines = [
+                "# Memory Index",
+                "",
+                "This file is generated from markdown memory entries.",
+                "",
+            ]
             for record in records:
                 lines.append(
                     f"- **{record.name}** (`{record.memory_type}`): "
                     f"{record.description}"
                 )
-        (self.root / INDEX_FILE_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            (self.root / INDEX_FILE_NAME).write_text(
+                "\n".join(lines) + "\n", encoding="utf-8"
+            )
 
     def replace_all(self, records: list[MemoryRecord]) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        for path in self.root.glob("*.md"):
-            if path.name != INDEX_FILE_NAME:
-                path.unlink()
-        for record in records:
-            self.remember(
-                name=record.name,
-                description=record.description,
-                content=record.content,
-                memory_type=record.memory_type,
-                source=record.source,
-            )
-        self.rebuild_index()
+        with self.writing():
+            self.root.mkdir(parents=True, exist_ok=True)
+            for path in self.root.glob("*.md"):
+                if path.name != INDEX_FILE_NAME:
+                    path.unlink()
+            for record in records:
+                self.remember(
+                    name=record.name,
+                    description=record.description,
+                    content=record.content,
+                    memory_type=record.memory_type,
+                    source=record.source,
+                )
+            self.rebuild_index()
 
     def _load_by_slug(self, slug: str) -> MemoryRecord | None:
         path = self.root / f"{slug}.md"

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from pathlib import Path
+from uuid import uuid4
 
 from codeagent import (
     Agent,
@@ -22,6 +24,13 @@ from codeagent import (
     resolve_planning_backend,
 )
 from codeagent.mcp import McpRouter
+from codeagent.memory import (
+    MemoryAccessController,
+    MemoryAccessPolicy,
+    MemoryWriteBlocked,
+)
+from codeagent.runtime import RuntimeDataPaths
+from codeagent.tools import LoadToolOutputTool
 from codeagent.web.storage import SQLiteRepository
 
 
@@ -51,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     env = EnvironmentConfig.from_env()
     stream = env.stream and not args.no_stream
     workspace = Path.cwd()
+    data_paths = RuntimeDataPaths(env.data_dir)
     query = " ".join(args.query).strip()
     requested_backend = args.planning_mode or env.planning_mode
     planning_backend = resolve_planning_backend(
@@ -63,7 +73,26 @@ def main(argv: list[str] | None = None) -> int:
         env.recovery_config,
         log=print if env.recovery_config.trace else None,
     )
-    memory_store = create_memory_store(env, workspace)
+    runtime_repository = (
+        SQLiteRepository.for_workspace(
+            workspace,
+            recover_incomplete=False,
+            data_dir=data_paths.root,
+        )
+        if env.memory_config.enabled or planning_backend is PlanningBackend.TASKS
+        else None
+    )
+    memory_access = (
+        MemoryAccessController(runtime_repository.has_active_team_run_for_workspace)
+        if runtime_repository is not None
+        else None
+    )
+    memory_store = create_memory_store(
+        env,
+        workspace,
+        data_paths,
+        access_policy=(memory_access.policy(workspace) if memory_access else None),
+    )
     memory_manager = (
         MemoryManager(
             memory_store,
@@ -81,7 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     task_list_id = None
     task_state_provider = None
     if planning_backend is PlanningBackend.TASKS:
-        task_repository = SQLiteRepository.for_workspace(workspace)
+        assert runtime_repository is not None
+        task_repository = runtime_repository
         if args.task_list:
             task_list = task_repository.get_task_list(args.task_list)
             if task_list is None:
@@ -105,8 +135,18 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         task_state_provider = task_state
+    context_root = data_paths.context_dir(
+        workspace,
+        conversation_id=task_list_id or "cli",
+        agent_id="agent_root",
+    )
+    context_config = replace(
+        env.context_config,
+        transcript_dir=context_root / "transcripts",
+        tool_output_dir=context_root / "tool-results",
+    )
     context = ContextManager(
-        config=env.context_config,
+        config=context_config,
         todo_store=todo_store,
         task_state_provider=task_state_provider,
     )
@@ -121,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         task_service=task_repository,
         task_list_id=task_list_id,
     )
+    tools.register(LoadToolOutputTool(context_config.tool_output_dir))
     mcp_path = (
         env.mcp_config_path
         if env.mcp_config_path.is_absolute()
@@ -152,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
             skill_loader,
             memory_store,
             env,
+            context_root,
         ),
         subagent_log=print,
         skill_catalog=skill_catalog,
@@ -187,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
                 print()
     finally:
         mcp_router.close()
+        if runtime_repository is not None:
+            runtime_repository.close()
 
 
 def print_stream_token(token: str) -> None:
@@ -204,16 +248,30 @@ def create_skill_loader(env: EnvironmentConfig, workspace: Path) -> SkillLoader 
     return SkillLoader(roots=roots)
 
 
-def create_memory_store(env: EnvironmentConfig, workspace: Path) -> MemoryStore | None:
+def create_memory_store(
+    env: EnvironmentConfig,
+    workspace: Path,
+    data_paths: RuntimeDataPaths,
+    *,
+    access_policy: MemoryAccessPolicy | None = None,
+) -> MemoryStore | None:
     if not env.memory_config.enabled:
         return None
 
-    root = env.memory_config.memory_dir
-    if not root.is_absolute():
-        root = workspace / root
+    root = data_paths.memory_dir(workspace)
+    legacy = data_paths.legacy_path(workspace, env.memory_config.memory_dir)
+    try:
+        if access_policy is None:
+            data_paths.import_legacy_directory(legacy, root)
+        else:
+            with access_policy.writing():
+                data_paths.import_legacy_directory(legacy, root)
+    except MemoryWriteBlocked:
+        pass
     return MemoryStore(
         root=root,
         max_memory_bytes=env.memory_config.max_memory_bytes,
+        access_policy=access_policy,
     )
 
 
@@ -222,18 +280,27 @@ def create_default_subagent_environment(
     skill_loader: SkillLoader | None,
     memory_store: MemoryStore | None,
     env: EnvironmentConfig,
+    context_root: Path,
 ):
     todo_store = TodoStore()
-    context = ContextManager(config=env.context_config, todo_store=todo_store)
+    subagent_root = context_root / "subagents" / uuid4().hex
+    context_config = replace(
+        env.context_config,
+        transcript_dir=subagent_root / "transcripts",
+        tool_output_dir=subagent_root / "tool-results",
+    )
+    tools = create_default_registry(
+        todo_store=todo_store,
+        todo_log=print,
+        skill_loader=skill_loader,
+        memory_store=memory_store,
+        allow_memory_write=env.memory_config.allow_subagent_write,
+        memory_max_items=env.memory_config.max_loaded_items,
+    )
+    tools.register(LoadToolOutputTool(context_config.tool_output_dir))
+    context = ContextManager(config=context_config, todo_store=todo_store)
     return (
-        create_default_registry(
-            todo_store=todo_store,
-            todo_log=print,
-            skill_loader=skill_loader,
-            memory_store=memory_store,
-            allow_memory_write=env.memory_config.allow_subagent_write,
-            memory_max_items=env.memory_config.max_loaded_items,
-        ),
+        tools,
         create_default_hooks(workspace=workspace, todo_store=todo_store),
         context,
     )

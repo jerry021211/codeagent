@@ -9,6 +9,7 @@ from typing import Any
 from codeagent.events import EventEmitter
 from codeagent.memory.models import MEMORY_TYPES, MemoryConfig, MemoryRecord
 from codeagent.memory.store import MemoryStore
+from codeagent.memory.access import MemoryWriteBlocked
 from codeagent.messages import Message, extract_text
 from codeagent.recovery import RecoveryRuntime
 from codeagent.runtime import CancellationToken
@@ -73,19 +74,23 @@ class MemoryManager:
     ) -> None:
         if not self.config.enabled:
             return
-        if self.config.auto_extract and client is not None:
-            extract_client = _fork_client(client, "memory_extract")
-            self.extract_from_recent_messages(
-                messages,
-                client=extract_client,
-                model=model,
-                max_tokens=max_tokens,
-            )
-        self.consolidate_if_needed(
-            client=_fork_client(client, "memory_consolidate"),
-            model=model,
-            max_tokens=max_tokens,
-        )
+        try:
+            with self.store.writing():
+                if self.config.auto_extract and client is not None:
+                    extract_client = _fork_client(client, "memory_extract")
+                    self.extract_from_recent_messages(
+                        messages,
+                        client=extract_client,
+                        model=model,
+                        max_tokens=max_tokens,
+                    )
+                self.consolidate_if_needed(
+                    client=_fork_client(client, "memory_consolidate"),
+                    model=model,
+                    max_tokens=max_tokens,
+                )
+        except MemoryWriteBlocked:
+            return
 
     def extract_from_recent_messages(
         self,
@@ -213,14 +218,16 @@ class MemoryManager:
         return self._lock_path().exists()
 
     def _write_lock(self) -> None:
-        self.store.root.mkdir(parents=True, exist_ok=True)
-        self._lock_path().write_text("locked\n", encoding="utf-8")
+        with self.store.writing():
+            self.store.root.mkdir(parents=True, exist_ok=True)
+            self._lock_path().write_text("locked\n", encoding="utf-8")
 
     def _remove_lock(self) -> None:
-        try:
-            self._lock_path().unlink()
-        except FileNotFoundError:
-            pass
+        with self.store.writing():
+            try:
+                self._lock_path().unlink()
+            except FileNotFoundError:
+                pass
 
     def _select_memory_filenames(
         self,
