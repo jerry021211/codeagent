@@ -20,3 +20,10 @@ web/*.tsbuildinfo
 
 # Local reference clone used while studying the tutorial repository.
 _reference/
+.reference/
+
+# Local evaluation outputs, scratch workspaces, and service logs.
+/eval-results/
+/tmp/
+/.tmp/
+/*.log
