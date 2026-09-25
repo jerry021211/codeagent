@@ -1,0 +1,11 @@
+{
+  "task_version": "c01-v1",
+  "origin": "current working tree, extracted minimal fixture",
+  "source_hashes": {
+    "codeagent/tools/read.py": "0b398fb9848e313dc4b585a83ccc8ac211f56a3ae68ac6b37cfa772c3b5666bc",
+    "codeagent/tools/base.py": "52b29ee9700d05bd0e2e2bb5b6b8f0ddd667b396bffc08588505c99986b672ca",
+    "codeagent/tools/workspace.py": "1b489aa836b4ba5824023b7de21410980b62dce662a5d4b33ca04350370bfbaf"
+  },
+  "seed": "start = max(0, offset - 1) -> start = max(0, offset)",
+  "claim": "Injected defect, not an existing product bug"
+}

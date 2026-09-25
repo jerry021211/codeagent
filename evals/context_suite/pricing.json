@@ -1,0 +1,20 @@
+{
+  "version": "user-screenshot-cny-v1",
+  "currency": "CNY",
+  "unit_tokens": 1000000,
+  "source": "用户在本对话提供的价格截图；未独立核实模型、平台及生效日期",
+  "model_verified": false,
+  "time_window_verified": false,
+  "scenarios": {
+    "offpeak": {
+      "label": "全部按空闲时段",
+      "main": {"input_tokens": "1", "output_tokens": "4", "cache_read_input_tokens": "0.02", "cache_creation_input_tokens": null},
+      "context_summary": {"input_tokens": "1", "output_tokens": "4", "cache_read_input_tokens": "0.02", "cache_creation_input_tokens": null}
+    },
+    "peak": {
+      "label": "全部按高峰时段",
+      "main": {"input_tokens": "2", "output_tokens": "8", "cache_read_input_tokens": "0.04", "cache_creation_input_tokens": null},
+      "context_summary": {"input_tokens": "2", "output_tokens": "8", "cache_read_input_tokens": "0.04", "cache_creation_input_tokens": null}
+    }
+  }
+}

@@ -1,0 +1,45 @@
+[
+  {
+    "id": "S01", "name": "短历史对照", "recipe": "short", "focus": "无压力时不应摘要或清理",
+    "facts": ["本任务使用 zh-CN；报告接口固定为 /v1/report。"],
+    "question": "根据此前约定填写 language 和 endpoint。",
+    "expected": {"language": "zh-CN", "endpoint": "/v1/report"},
+    "fact_markers": ["zh-CN", "/v1/report"]
+  },
+  {
+    "id": "S02", "name": "长搜索结果", "recipe": "search", "focus": "旧调查结果投影、按需回读",
+    "facts": ["定位结论：入口文件 src/report/exporter.py，函数 emit_report，当前输出 JSON。"],
+    "question": "定位此前发现的报告入口，填写 entry_file、entry_symbol 和 format。可以重新调查工作区资料。",
+    "expected": {"entry_file": "src/report/exporter.py", "entry_symbol": "emit_report", "format": "JSON"},
+    "fact_markers": ["src/report/exporter.py", "emit_report"]
+  },
+  {
+    "id": "S03", "name": "旧需求被修正", "recipe": "revision", "focus": "摘要保留最新要求、否决旧方案",
+    "facts": ["最初设想：CSV，字段 name、amount，允许覆盖。", "最终修正：改成 JSON；字段必须是 姓名、金额；编码 UTF-8；禁止覆盖已有文件。此前 CSV 方案废止。"],
+    "question": "按最终有效要求填写 format、fields（按约定顺序）、encoding、overwrite（布尔值）。",
+    "expected": {"format": "JSON", "fields": ["姓名", "金额"], "encoding": "UTF-8", "overwrite": false},
+    "fact_markers": ["姓名", "金额", "CSV 方案废止"]
+  },
+  {
+    "id": "S04", "name": "长输出隐藏证据", "recipe": "archive", "focus": "入站归档、日志中段分页回读",
+    "facts": ["已完成一次只读审计，完整结果较长。异常记录在原始输出的第 1201 行附近，请查归档，不必重跑命令。"],
+    "question": "从此前审计输出的第 1201 行核实 fault_code、record_id、retryable（布尔值）。",
+    "expected": {"fault_code": "E_REPLAY_731", "record_id": "ROW-4829", "retryable": false},
+    "fact_markers": ["E_REPLAY_731", "ROW-4829"],
+    "requires_archive_evidence": true
+  },
+  {
+    "id": "S05", "name": "完成、失败与未验证", "recipe": "status", "focus": "不重复成功操作、不把局部通过说成全部通过",
+    "facts": ["已完成发布登记，回执 DEPLOY-7291。单元测试命令 python -m unittest tests.unit 通过；集成测试 tests.integration 失败，错误 DB_TIMEOUT_63。全量测试没有运行。禁止再次发布。这里的发布仅为合成历史，没有真实外部操作。"],
+    "question": "继续交接：填写 receipt、unit_status、integration_status、full_suite_status、repeat_deploy（布尔值）、next_action（fix_integration 或 deploy）。状态使用 passed、failed、not_run。",
+    "expected": {"receipt": "DEPLOY-7291", "unit_status": "passed", "integration_status": "failed", "full_suite_status": "not_run", "repeat_deploy": false, "next_action": "fix_integration"},
+    "fact_markers": ["DEPLOY-7291", "DB_TIMEOUT_63", "全量测试没有运行"]
+  },
+  {
+    "id": "S06", "name": "跨阶段精确交接", "recipe": "handoff", "focus": "精确路径、进度与不确定性在长历史后保留",
+    "facts": ["阶段一已完成解析器，路径 src/parser/reader.py，入口 parse_record。阶段二阻塞：ISSUE-407，输入样例尚未确认，不能标成已解决。下一步先核实样例再修改 src/report/render.py 的 render_row。"],
+    "question": "填写 completed_file、completed_symbol、blocked_issue、blocker_resolved（布尔值）、next_file、next_symbol、next_action（verify_sample 或 rewrite_parser）。",
+    "expected": {"completed_file": "src/parser/reader.py", "completed_symbol": "parse_record", "blocked_issue": "ISSUE-407", "blocker_resolved": false, "next_file": "src/report/render.py", "next_symbol": "render_row", "next_action": "verify_sample"},
+    "fact_markers": ["src/parser/reader.py", "ISSUE-407", "src/report/render.py"]
+  }
+]
