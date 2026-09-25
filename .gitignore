@@ -22,6 +22,9 @@ web/*.tsbuildinfo
 _reference/
 .reference/
 
+# Independent local repository; do not track it as a gitlink.
+/deepseek-eyes/
+
 # Local evaluation outputs, scratch workspaces, and service logs.
 /eval-results/
 /tmp/
