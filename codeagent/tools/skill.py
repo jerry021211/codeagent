@@ -19,15 +19,14 @@ class LoadSkillTool:
         default=ToolDefinition(
             name=LOAD_SKILL_TOOL_NAME,
             description=(
-                "Load full instructions for an available skill by name. "
-                "Use this before applying specialized workflows from the skill catalog."
+                "按目录中的准确名称用 load_skill(name) 加载技能全文，再应用其专业流程。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Exact skill name from the available skill catalog.",
+                        "description": "可用技能目录中的准确名称",
                     }
                 },
                 "required": ["name"],

@@ -69,13 +69,31 @@ class WorkspaceCatalog:
             raise ValueError("Workspace must be an existing directory")
         return resolved
 
-    def list(self, value: str | Path | None = None) -> WorkspaceListing:
+    def list(
+        self, value: str | Path | None = None, *, query: str | None = None
+    ) -> WorkspaceListing:
         current = self.resolve(value or self.default_workspace)
+        term = ""
+        if query and query.strip():
+            raw = query.strip()
+            normalized = raw.replace("/", "\\") if os.name == "nt" else raw
+            if os.name == "nt" and normalized.startswith("\\\\"):
+                raise ValueError("Network and UNC workspaces are not supported")
+            candidate = Path(raw).expanduser()
+            if not candidate.is_absolute():
+                if candidate.drive or candidate.root:
+                    raise ValueError("Workspace path must be absolute")
+                candidate = current / candidate
+            if raw.endswith(("/", "\\") if os.name == "nt" else ("/",)) or candidate == candidate.parent:
+                current = self.resolve(candidate)
+            else:
+                current = self.resolve(candidate.parent)
+                term = candidate.name.casefold()
         entries: list[WorkspaceEntry] = []
         try:
             children = sorted(
-                (item for item in current.iterdir() if item.is_dir()),
-                key=lambda item: (not self._is_project(item), item.name.casefold()),
+                (item for item in current.iterdir() if item.is_dir() and self._match_rank(item.name, term) < 4),
+                key=lambda item: (self._match_rank(item.name, term), not self._is_project(item), item.name.casefold()),
             )
         except OSError as exc:
             raise ValueError(f"Directory cannot be read: {current}") from exc
@@ -98,6 +116,19 @@ class WorkspaceCatalog:
             roots=self._roots(current),
             entries=tuple(entries),
         )
+
+    @staticmethod
+    def _match_rank(name: str, term: str) -> int:
+        """Rank exact, prefix, substring, then ordered-character matches."""
+        name = name.casefold()
+        if not term or name == term:
+            return 0
+        if name.startswith(term):
+            return 1
+        if term in name:
+            return 2
+        letters = iter(name)
+        return 3 if all(character in letters for character in term) else 4
 
     @staticmethod
     def _is_project(path: Path) -> bool:

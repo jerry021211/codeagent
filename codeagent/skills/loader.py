@@ -44,24 +44,17 @@ class SkillLoader:
         return self.list_skills()
 
     def list_skills(self) -> list[SkillMetadata]:
-        return [skill.metadata for skill in self._skills.values()]
+        return [self._skills[name].metadata for name in sorted(self._skills)]
 
     def catalog_prompt(self) -> str:
         skills = self.list_skills()
         if not skills:
             return ""
 
-        lines = [
-            "Available skills:",
-            "Load a skill only when the user's task matches its description.",
-        ]
+        lines = ["可用技能："]
         for skill in skills:
-            lines.append(f"- {skill.name}: {skill.description}")
-            if skill.when_to_use:
-                lines.append(f"  Use when: {skill.when_to_use}")
-        lines.append(
-            "Use load_skill(name) to load full instructions before applying a matching skill."
-        )
+            usage = f"；适用场景：{skill.when_to_use}" if skill.when_to_use else ""
+            lines.append(f"- {skill.name}：{skill.description}{usage}")
         return "\n".join(lines)
 
     def load(self, name: str) -> LoadedSkill:

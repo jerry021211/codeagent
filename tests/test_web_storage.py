@@ -157,6 +157,25 @@ class SQLiteRepositoryTests(unittest.TestCase):
         self.assertTrue(self.repository.delete_message(message.id))
         self.assertIsNone(self.repository.get_message(message.id))
 
+    def test_delete_preserves_shared_tasks_and_releases_only_its_ownership(self) -> None:
+        conversation = self.repository.create_conversation(workspace="project", conversation_id="conv_a")
+        other = self.repository.create_conversation(workspace="project", conversation_id="convXa")
+        shared = self.repository.update_task_list(conversation.active_task_list_id, promote=True)
+        self.repository.bind_conversation_task_list(other.id, shared.id)
+        owned = self.repository.create_task(shared.id, subject="Owned", description="Owned")
+        untouched = self.repository.create_task(shared.id, subject="Other", description="Other")
+        self.repository.update_task(shared.id, owned.task.id, changes={"status": "in_progress"}, actor_owner=f"{conversation.id}:agent")
+        self.repository.update_task(shared.id, untouched.task.id, changes={"status": "in_progress"}, actor_owner=f"{other.id}:agent")
+
+        self.assertTrue(self.repository.delete_conversation(conversation.id))
+
+        self.assertIsNotNone(self.repository.get_task_list(shared.id))
+        released = self.repository.get_task_resource(shared.id, owned.task.id)
+        self.assertEqual(released.task.status, "pending")
+        self.assertIsNone(released.task.owner)
+        self.assertEqual(self.repository.get_task_resource(shared.id, untouched.task.id).task.owner, f"{other.id}:agent")
+        self.assertEqual(self.repository.get_conversation(other.id).active_task_list_id, shared.id)
+
     def test_foreign_keys_and_one_active_run_per_conversation(self) -> None:
         conversation, first = self.create_run()
 

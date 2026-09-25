@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 try:
     from fastapi.testclient import TestClient
@@ -26,6 +28,7 @@ class FakeScheduler:
         self.stopped = False
         self.submissions: list[tuple[str, str, bool]] = []
         self.mcp_reloads: list[str] = []
+        self.modes: list[str] = []
 
     def start(self) -> None:
         self.started = True
@@ -33,7 +36,8 @@ class FakeScheduler:
     def stop(self) -> None:
         self.stopped = True
 
-    def submit(self, conversation_id: str, content: str, *, use_team: bool = False):
+    def submit(self, conversation_id: str, content: str, *, use_team: bool = False, mode: str = "normal"):
+        self.modes.append(mode)
         self.submissions.append((conversation_id, content, use_team))
         run = self.repository.create_run(conversation_id)
         self.repository.create_message(
@@ -91,6 +95,42 @@ class WebApiTests(unittest.TestCase):
         self.repository.close()
         self.temp_dir.cleanup()
 
+    def test_user_question_answer_contract(self) -> None:
+        conversation = self.repository.create_conversation(workspace=self.workspace)
+        run = self.repository.create_run(conversation.id)
+        self.repository.start_run(run.id)
+        question = self.repository.create_user_question(run.id, "格式？", ["CSV", "JSON"])
+        url = f"/api/runs/{run.id}/questions/{question['id']}/answer"
+        self.assertEqual(self.client.get(f"/api/runs/{run.id}/questions").json(), [question])
+        self.assertEqual(self.client.post(url, json={"answer": " "}).status_code, 422)
+        self.assertEqual(self.client.post(url, json={"answer": "x" * 20001}).status_code, 422)
+        self.assertEqual(self.client.post(url, json={"answer": "JSON"}).status_code, 200)
+        self.assertEqual(self.client.post(url, json={"answer": "JSON"}).status_code, 200)
+        self.assertEqual(self.client.post(url, json={"answer": "CSV"}).status_code, 409)
+        self.assertEqual(self.client.post(f"/api/runs/wrong/questions/{question['id']}/answer", json={"answer": "JSON"}).status_code, 404)
+        pending = self.repository.create_user_question(run.id, "文件名？", [])
+        self.repository.request_run_cancel(run.id)
+        self.assertEqual(self.client.post(f"/api/runs/{run.id}/questions/{pending['id']}/answer", json={"answer": "out.json"}).status_code, 409)
+
+    def test_activity_history_is_paginated_without_text_delta_replay(self):
+        conversation = self.repository.create_conversation(workspace=self.workspace)
+        run = self.repository.create_run(conversation.id)
+        other_conversation = self.repository.create_conversation(workspace=self.workspace)
+        other = self.repository.create_run(other_conversation.id)
+        for kind in ["tool.requested", "model.text_delta", "tool.completed", "model.text_delta", "tool.interrupted"]:
+            self.repository.append_event(RunEvent(type=kind, run_id=run.id, conversation_id=conversation.id, payload={"tool_use_id": "one"}))
+        self.repository.append_event(RunEvent(type="tool.started", run_id=other.id))
+        self.repository.update_run_status(run.id, "cancelled")
+        first = self.client.get(f"/api/runs/{run.id}/activity?limit=2")
+        self.assertEqual(first.status_code, 200)
+        body = first.json()
+        self.assertEqual(body["status"], "cancelled")
+        self.assertEqual([event["type"] for event in body["events"]], ["tool.requested", "tool.completed"])
+        second = self.client.get(f"/api/runs/{run.id}/activity?after={body['next_after']}&limit=2").json()
+        self.assertEqual([event["type"] for event in second["events"]], ["tool.interrupted"])
+        self.assertIsNone(second["next_after"])
+        self.assertEqual(self.client.get("/api/runs/missing/activity").status_code, 404)
+
     def test_lifespan_health_and_runtime_config(self) -> None:
         self.assertTrue(self.scheduler.started)
         health = self.client.get("/healthz")
@@ -106,6 +146,18 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(body["features"]["agent_team"])
         disabled = self.client.get("/api/teams")
         self.assertEqual(disabled.status_code, 503)
+
+    def test_discuss_mode_api_and_team_conflict(self) -> None:
+        conversation = self.repository.create_conversation(title="Discuss", workspace=str(self.workspace))
+        url = f"/api/conversations/{conversation.id}/runs"
+        response = self.client.post(url, json={"content": "inspect", "mode": "discuss"})
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(self.scheduler.modes, ["discuss"])
+        conflict = self.client.post(url, json={"content": "inspect", "mode": "discuss", "useTeam": True})
+        self.assertEqual(conflict.status_code, 409)
+        invalid = self.client.post(url, json={"content": "inspect", "mode": "unsafe"})
+        self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(len(self.scheduler.submissions), 1)
 
     def test_task_event_endpoint_returns_sse_stream(self) -> None:
         created = self.client.post(
@@ -195,6 +247,99 @@ class WebApiTests(unittest.TestCase):
             len(self.client.get("/api/conversations?archived=true").json()), 1
         )
 
+    def test_delete_conversation_cleans_history_and_preserves_other_conversations(self) -> None:
+        conversation = self.repository.create_conversation(workspace=str(self.workspace))
+        other = self.repository.create_conversation(workspace=str(self.workspace))
+        run = self.repository.create_run(conversation.id)
+        message = self.repository.create_message(conversation.id, role="user", content="delete me", run_id=run.id)
+        self.repository.append_event(RunEvent(type="run.started", run_id=run.id))
+        self.repository.update_run_status(run.id, "completed")
+        self.repository.create_task(conversation.active_task_list_id, subject="Private", description="Delete with chat")
+        self.repository.update_conversation(conversation.id, archived=True)
+        project_file = self.workspace / "keep.txt"
+        project_file.write_text("keep", encoding="utf-8")
+
+        url = f"/api/conversations/{conversation.id}"
+        deleted = self.client.delete(url)
+
+        self.assertEqual(deleted.status_code, 204)
+        self.assertEqual(deleted.content, b"")
+        self.assertEqual(self.client.get(url).status_code, 404)
+        self.assertEqual(self.client.delete(url).status_code, 404)
+        self.assertIsNone(self.repository.get_message(message.id))
+        self.assertIsNone(self.repository.get_run(run.id))
+        self.assertIsNone(self.repository.get_task_list(conversation.active_task_list_id))
+        self.assertIsNotNone(self.repository.get_conversation(other.id))
+        self.assertIsNotNone(self.repository.get_task_list(other.active_task_list_id))
+        self.assertEqual(project_file.read_text(encoding="utf-8"), "keep")
+        remaining = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM database_changes WHERE scope_id IN (?, ?, ?)",
+            (conversation.id, run.id, conversation.active_task_list_id),
+        ).fetchone()[0]
+        self.assertEqual(remaining, 0)
+        self.assertEqual(self.repository._connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_delete_conversation_rejects_active_runs(self) -> None:
+        for run_status in ("queued", "running"):
+            with self.subTest(status=run_status):
+                conversation = self.repository.create_conversation(workspace=str(self.workspace))
+                run = self.repository.create_run(conversation.id, status=run_status)
+                response = self.client.delete(f"/api/conversations/{conversation.id}")
+                self.assertEqual(response.status_code, 409)
+                self.assertIn("先停止", response.json()["detail"])
+                self.assertIsNotNone(self.repository.get_conversation(conversation.id))
+                self.assertEqual(self.repository.get_run(run.id).status, run_status)
+
+    def test_delete_conversation_rejects_active_team_after_root_finishes(self) -> None:
+        conversation = self.repository.create_conversation(workspace=str(self.workspace))
+        run = self.repository.create_run(conversation.id)
+        self.repository.create_team_run(
+            conversation_id=conversation.id, root_run_id=run.id,
+            task_list_id=conversation.active_task_list_id, base_commit="a" * 40,
+        )
+        self.repository.update_run_status(run.id, "completed")
+        response = self.client.delete(f"/api/conversations/{conversation.id}")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("团队", response.json()["detail"])
+        self.assertIsNotNone(self.repository.get_conversation(conversation.id))
+
+    def test_disabled_team_cannot_resume_through_normal_chat(self) -> None:
+        conversation = self.client.post(
+            "/api/conversations",
+            json={"title": "Existing team", "workspace": str(self.workspace)},
+        ).json()
+        root_run = self.repository.create_run(conversation["id"])
+        team = self.repository.create_team_run(
+            conversation_id=conversation["id"],
+            root_run_id=root_run.id,
+            task_list_id=conversation["active_task_list_id"],
+            base_commit="a" * 40,
+            lead_agent_id="disabled_team_lead",
+        )
+        sessions_before = self.repository.list_agent_sessions(team.id)
+
+        response = self.client.post(
+            f"/api/conversations/{conversation['id']}/runs",
+            json={"content": "继续", "useTeam": False},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Team 功能已关闭", response.json()["detail"])
+        self.assertEqual(self.scheduler.submissions, [])
+        self.assertEqual(self.repository.get_team_run(team.id), team)
+        self.assertEqual(self.repository.list_agent_sessions(team.id), sessions_before)
+
+        ordinary = self.client.post(
+            "/api/conversations",
+            json={"title": "Ordinary", "workspace": str(self.workspace)},
+        ).json()
+        response = self.client.post(
+            f"/api/conversations/{ordinary['id']}/runs",
+            json={"content": "普通任务"},
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(self.scheduler.submissions, [(ordinary["id"], "普通任务", False)])
+
     def test_run_usage_cancel_and_approval(self) -> None:
         conversation = self.repository.create_conversation(title="Run test")
         run = self.scheduler.submit(conversation.id, "hello")
@@ -233,6 +378,20 @@ class WebApiTests(unittest.TestCase):
         cancelled = self.client.post(f"/api/runs/{run.id}/cancel")
         self.assertEqual(cancelled.status_code, 200)
         self.assertEqual(cancelled.json()["status"], "cancelled")
+
+    def test_workspace_search_returns_fuzzy_candidates(self) -> None:
+        project = self.workspace / "ii-project-00"
+        project.mkdir()
+        response = self.client.get(
+            "/api/workspaces", params={"query": str(self.workspace / "II00")}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["current"], str(self.workspace.resolve()))
+        self.assertEqual([entry["path"] for entry in response.json()["entries"]], [str(project.resolve())])
+        rejected = self.client.post(
+            "/api/conversations", json={"workspace": str(self.workspace / "II00")}
+        )
+        self.assertEqual(rejected.status_code, 422)
 
     def test_mcp_config_can_be_managed_for_workspace(self) -> None:
         empty = self.client.get(
@@ -364,7 +523,67 @@ class WebApiTests(unittest.TestCase):
             f"/api/runs/{run.id}/events?after={second.seq}"
         )
         self.assertEqual(drained.status_code, 200)
-        self.assertEqual(drained.text, "")
+        self.assertIn("event: stream.end", drained.text)
+        self.assertNotIn("event: run.", drained.text)
+
+    def test_conversation_summary_exposes_waiting_question_and_latest_run(self) -> None:
+        conversation = self.repository.create_conversation(workspace=str(self.workspace))
+        run = self.repository.create_run(conversation.id)
+        self.repository.start_run(run.id)
+        question = self.repository.create_user_question(run.id, "format?", ["CSV"])
+        response = self.client.get(f"/api/conversations/{conversation.id}").json()
+        self.assertEqual(response["latest_run_id"], run.id)
+        self.assertTrue(response["waiting_for_answer"])
+        self.repository.answer_user_question(run.id, question["id"], "CSV")
+        self.repository.update_run_status(run.id, "completed")
+        response = self.client.get(f"/api/conversations/{conversation.id}").json()
+        self.assertEqual(response["latest_run_id"], run.id)
+        self.assertIsNone(response["active_run_id"])
+        self.assertFalse(response["waiting_for_answer"])
+
+    def test_sse_drains_multiple_pages_before_end_marker(self) -> None:
+        conversation = self.repository.create_conversation()
+        run = self.repository.create_run(conversation.id)
+        for index in range(505):
+            self.repository.append_event(RunEvent(
+                type="model.text_delta", run_id=run.id, conversation_id=conversation.id,
+                payload={"text": str(index)},
+            ))
+        self.repository.update_run_status(run.id, "cancelled")
+        response = self.client.get(f"/api/runs/{run.id}/events")
+        self.assertEqual(response.text.count("event: model.text_delta"), 505)
+        self.assertEqual(response.text.count("event: stream.end"), 1)
+        self.assertLess(response.text.index("id: 505\n"), response.text.index("event: stream.end"))
+
+    def test_sse_waits_for_final_event_after_terminal_status_was_committed(self) -> None:
+        conversation = self.repository.create_conversation()
+        run = self.repository.create_run(conversation.id)
+        self.repository.start_run(run.id)
+        self.repository.update_run_status(run.id, "completed")
+        checked, released = threading.Event(), threading.Event()
+
+        def pending(_run_id):
+            checked.set()
+            return not released.is_set()
+
+        def finish_event():
+            if checked.wait(3):
+                self.repository.append_event(RunEvent(
+                    type="run.completed", run_id=run.id, conversation_id=conversation.id,
+                    payload={"status": "completed"},
+                ))
+            released.set()
+
+        worker = threading.Thread(target=finish_event)
+        with patch.object(self.scheduler, "is_run_pending", pending, create=True):
+            worker.start()
+            try:
+                response = self.client.get(f"/api/runs/{run.id}/events")
+            finally:
+                worker.join(timeout=3)
+        self.assertIn("event: run.completed", response.text)
+        self.assertIn("event: stream.end", response.text)
+        self.assertLess(response.text.index("event: run.completed"), response.text.index("event: stream.end"))
 
     def test_local_security_and_static_fallback(self) -> None:
         no_cookie_app = create_app(

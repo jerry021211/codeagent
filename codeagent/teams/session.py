@@ -117,7 +117,7 @@ class AgentSessionRunner:
         agent.context.state = RuntimeState(**values)
         agent.history_observer.restore(
             generation=agent.context.state.history_generation,
-            last_sent=agent.messages,
+            last_sent=agent.context.project_messages(agent.messages),
         )
 
 

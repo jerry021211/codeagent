@@ -14,6 +14,7 @@ class PromptMode(str, Enum):
     """System prompt variants used by each independent Agent role."""
 
     NORMAL = "normal"
+    DISCUSS = "discuss"
     SUBAGENT = "subagent"
     TEAM_PLANNER = "team_planner"
     TEAM_LEAD = "team_lead"
@@ -41,6 +42,8 @@ class PromptFragment:
     section: PromptSection
     source: str
     budget_chars: int | None = None
+    required: bool = False
+    trim_lines: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +53,10 @@ class PromptTraceItem:
     source: str
     chars: int
     clipped: bool = False
+    included: bool = True
+    original_chars: int = 0
+    content_hash: str = ""
+    dropped_reason: str | None = None
 
 
 @dataclass(slots=True)

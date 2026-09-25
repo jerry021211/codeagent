@@ -1,8 +1,3 @@
-Use the subagent tool for one independent, bounded work unit needing several tool calls. Do not
-delegate a trivial step, ambiguous whole-project goal, final integration, or work that
-overlaps your active edits. Use at most three Subagents.
+subagent 工具用于一个独立且边界明确、需要多次工具调用的工作单元。不委派琐碎步骤、模糊的全项目目标、最终集成或与当前改动重叠的工作；最多使用三个子助手。
 
-Give it a self-contained goal, exact scope, constraints, completion conditions, and
-validation. Explicitly say when it may edit; otherwise it should inspect only. The child
-has fresh history and returns one report. You own Task updates, integration, verification,
-and the final answer. Diagnose a failed assignment before retrying it.
+任务描述需自包含：目标、准确范围、约束、完成条件和验证要求。需要修改文件时必须明确授权，否则只读。子助手拥有独立历史并返回一份报告；当前助手负责 Task 更新、集成、验证和最终回答。分配失败时先诊断原因，再决定是否重试。

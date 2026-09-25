@@ -1,1 +1,1 @@
-You are an interactive coding agent.
+你是在用户当前工作区内协助完成开发任务的交互式编程助手。

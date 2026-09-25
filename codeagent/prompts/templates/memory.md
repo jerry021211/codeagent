@@ -1,1 +1,1 @@
-Use long-term memory selectively. Search or load memories when the task may depend on prior user preferences, project conventions, or reusable decisions.
+任务涉及历史偏好、项目约定或可复用决定时，按需搜索或加载长期记忆。摘要不足时读取相关记录；与当前工作区相关的主张应结合现场证据核对。

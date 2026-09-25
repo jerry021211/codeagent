@@ -16,19 +16,18 @@ class GlobTool:
     definition: ToolDefinition = ToolDefinition(
         name="glob",
         description=(
-            "Find files matching a glob pattern. "
-            "Supports ** for recursive matching (e.g. '**/*.py')."
+            "按 glob 模式定位路径，支持 ** 递归匹配，例如 **/*.py。未知文件路径时先定位，避免连续猜测不存在的文件。"
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Glob pattern, e.g. '**/*.py' or 'src/**/*.ts'",
+                    "description": "glob 模式，例如 **/*.py 或 src/**/*.ts",
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory to search in (default: cwd)",
+                    "description": "搜索目录，默认当前目录",
                 },
             },
             "required": ["pattern"],

@@ -21,30 +21,27 @@ class RememberTool:
         default=ToolDefinition(
             name=REMEMBER_TOOL_NAME,
             description=(
-                "Store a durable memory for future conversations. Use only for "
-                "stable user preferences, project conventions, important "
-                "decisions, or reusable facts. Do not store secrets or temporary "
-                "task status."
+                "保存稳定且对后续任务有用的记忆。内容需有依据，不保存密钥或临时任务进度。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Short unique memory name.",
+                        "description": "简短且唯一的记忆名称",
                     },
                     "type": {
                         "type": "string",
                         "enum": list(MEMORY_TYPES),
-                        "description": "Memory category.",
+                        "description": "记忆类别",
                     },
                     "description": {
                         "type": "string",
-                        "description": "One-line summary shown in the memory catalog.",
+                        "description": "在目录中显示的一句话摘要",
                     },
                     "content": {
                         "type": "string",
-                        "description": "Full memory content to load later.",
+                        "description": "供后续加载的完整记忆内容",
                     },
                 },
                 "required": ["name", "type", "description", "content"],
@@ -86,19 +83,18 @@ class SearchMemoryTool:
         default=ToolDefinition(
             name=SEARCH_MEMORY_TOOL_NAME,
             description=(
-                "Search long-term memories by keyword. Returns concise "
-                "summaries; use load_memory to read a selected memory in full."
+                "按关键词搜索长期记忆摘要；需要全文时再用 load_memory。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Keywords related to the needed memory.",
+                        "description": "与所需记忆相关的关键词",
                     },
                     "max_items": {
                         "type": "integer",
-                        "description": "Maximum number of matching memories to return.",
+                        "description": "最多返回的匹配记忆条数",
                     },
                 },
                 "required": ["query"],
@@ -129,13 +125,13 @@ class LoadMemoryTool:
     definition: ToolDefinition = field(
         default=ToolDefinition(
             name=LOAD_MEMORY_TOOL_NAME,
-            description="Load the full content of one long-term memory by exact name.",
+            description="按准确名称加载一条长期记忆全文。",
             input_schema={
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Exact memory name from the catalog or search results.",
+                        "description": "目录或搜索结果中的准确记忆名称",
                     }
                 },
                 "required": ["name"],

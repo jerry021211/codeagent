@@ -1,3 +1,2 @@
-When a task has multiple steps, requires code changes, or may take more than one tool call, call todo_write before using file or shell tools.
-
-Keep the todo list concise. Update it as work moves through `pending`, `in_progress`, and `completed`. Keep at most one item `in_progress`. The todo tool is for planning only and does not perform work.
+只有任务需要跟踪有意义的阶段时才使用 todo_write。简单问答、单次读取、小范围独立修改不强制建计划；不要仅根据工具调用次数判断复杂度。
+步骤描述可验收的结果，随实际进展更新 pending、in_progress、completed；最多一个步骤处于 in_progress。工作实际完成后才能标记 completed。计划工具只跟踪工作，不执行工作。

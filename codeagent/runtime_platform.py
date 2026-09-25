@@ -32,8 +32,8 @@ class RuntimePlatform:
         """Describe the detected platform in terms useful to the model."""
 
         return (
-            f"Current operating system: {self.operating_system}. "
-            f"Command shell: {self.shell_name} ({self.shell_executable}). "
+            f"当前操作系统：{self.operating_system}。"
+            f"命令 Shell：{self.shell_name} ({self.shell_executable})。"
             f"{self.command_style}"
         )
 
@@ -71,9 +71,8 @@ def detect_runtime_platform(
                         "-Command",
                     ),
                     command_style=(
-                        "Use PowerShell cmdlets, PowerShell separators, and Windows "
-                        "path syntax. Do not use POSIX-only command syntax unless the "
-                        "required executable has first been verified as available."
+                        "使用 PowerShell 命令、分隔符和 Windows 路径。"
+                        "先确认所需程序可用，再使用仅适用于 POSIX 的命令语法。"
                     ),
                 )
 
@@ -83,8 +82,7 @@ def detect_runtime_platform(
             shell_executable=os.environ.get("COMSPEC", "cmd.exe"),
             shell_arguments=("/d", "/s", "/c"),
             command_style=(
-                "Use cmd.exe commands, separators, and Windows path syntax. Do not "
-                "use PowerShell cmdlets or POSIX-only command syntax."
+                "使用 cmd.exe 命令、分隔符和 Windows 路径，不使用 PowerShell 或仅适用于 POSIX 的语法。"
             ),
         )
 
@@ -100,8 +98,7 @@ def detect_runtime_platform(
             shell_executable=bash,
             shell_arguments=("--noprofile", "--norc", "-c"),
             command_style=(
-                "Use Bash/POSIX commands, separators, and POSIX path syntax. Do not "
-                "use PowerShell cmdlets or Windows cmd.exe built-ins."
+                "使用 Bash/POSIX 命令、分隔符和路径，不使用 PowerShell 命令或 cmd.exe 内置命令。"
             ),
         )
 
@@ -112,8 +109,7 @@ def detect_runtime_platform(
         shell_executable=shell,
         shell_arguments=("-c",),
         command_style=(
-            "Use portable POSIX sh commands, separators, and POSIX path syntax. Do "
-            "not use Bash-only syntax, PowerShell cmdlets, or Windows cmd.exe built-ins."
+            "使用可移植的 POSIX sh 命令、分隔符和路径，不使用 Bash 专属语法、PowerShell 或 cmd.exe 内置命令。"
         ),
     )
 

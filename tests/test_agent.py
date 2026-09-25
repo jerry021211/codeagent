@@ -130,7 +130,7 @@ class AgentTests(unittest.TestCase):
         agent.run("Try again")
 
         self.assertIn(
-            "available tool schemas changed since the previous turn",
+            "工具 schema 相比上次调用已变化",
             client.calls[0]["system"],
         )
         self.assertTrue(state.tool_schema_hash)
@@ -221,8 +221,8 @@ class AgentTests(unittest.TestCase):
             {"role": "user", "content": "inspect the project"},
         )
         self.assertEqual(len(client.calls[1]["messages"]), 1)
-        self.assertIn("Current workspace:", client.calls[1]["system"])
-        self.assertIn("## Outcome", client.calls[1]["system"])
+        self.assertIn("当前工作区：", client.calls[1]["system"])
+        self.assertIn("## 结果", client.calls[1]["system"])
         subagent_tool_names = {tool["name"] for tool in client.calls[1]["tools"]}
         self.assertIn("echo", subagent_tool_names)
         self.assertNotIn("subagent", subagent_tool_names)
@@ -345,8 +345,8 @@ class AgentTests(unittest.TestCase):
 
         agent.run("do work")
 
-        self.assertIn("interactive coding agent", client.system_prompt)
-        self.assertIn("Use the subagent tool", client.system_prompt)
+        self.assertIn("交互式编程助手", client.system_prompt)
+        self.assertIn("subagent 工具用于", client.system_prompt)
 
     def test_agent_injects_before_model_call_reminders(self) -> None:
         class EndTurnClient:
@@ -367,7 +367,8 @@ class AgentTests(unittest.TestCase):
 
         agent.run("do work")
 
-        self.assertEqual(agent.messages[1]["content"], "<reminder>plan</reminder>")
+        self.assertIn("<reminder>plan</reminder>", agent.messages[1]["content"])
+        self.assertTrue(agent.messages[1]["content"].startswith("[运行时提醒："))
 
     def test_agent_adds_todo_guidance_when_tool_is_available(self) -> None:
         class CaptureClient:
@@ -392,8 +393,8 @@ class AgentTests(unittest.TestCase):
 
         agent.run("do work")
 
-        self.assertIn("interactive coding agent", client.system_prompt)
-        self.assertIn("call todo_write before", client.system_prompt)
+        self.assertIn("交互式编程助手", client.system_prompt)
+        self.assertIn("使用 todo_write", client.system_prompt)
 
     def test_agent_adds_skill_catalog_when_available(self) -> None:
         class CaptureClient:
@@ -412,14 +413,18 @@ class AgentTests(unittest.TestCase):
             client=client,
             tools=ToolRegistry(),
             config=AgentConfig(model="fake-model"),
-            skill_catalog="Available skills:\n- python-refactor: Refactor Python.",
+            skill_catalog="可用技能：\n- python-refactor: Refactor Python.",
+        )
+        agent.tools.register_handler(
+            ToolDefinition(name="load_skill", description="加载技能", input_schema={"type": "object"}),
+            lambda **kwargs: "skill",
         )
 
         agent.run("do work")
 
-        self.assertIn("Available skills:", client.system_prompt)
+        self.assertIn("可用技能：", client.system_prompt)
         self.assertIn("python-refactor", client.system_prompt)
-        self.assertIn("Use load_skill(name)", client.system_prompt)
+        self.assertIn("仅在任务匹配技能适用范围时", client.system_prompt)
 
     def test_agent_adds_memory_catalog_when_available(self) -> None:
         class CaptureClient:
@@ -442,16 +447,16 @@ class AgentTests(unittest.TestCase):
             tools=tools,
             config=AgentConfig(model="fake-model"),
             memory_catalog=(
-                "Available memories:\n"
+                "可用记忆：\n"
                 "- Project Style [project]: Explain call chains first."
             ),
         )
 
         agent.run("do work")
 
-        self.assertIn("Available memories:", client.system_prompt)
+        self.assertIn("可用记忆：", client.system_prompt)
         self.assertIn("Project Style", client.system_prompt)
-        self.assertIn("Use long-term memory selectively", client.system_prompt)
+        self.assertIn("按需搜索或加载长期记忆", client.system_prompt)
 
     def test_agent_injects_llm_selected_memory_context(self) -> None:
         class SelectionClient:
@@ -500,11 +505,11 @@ class AgentTests(unittest.TestCase):
 
             self.assertIn("selected_memories", client.calls[0]["messages"][0]["content"])
             turn_content = client.calls[1]["messages"][0]["content"]
-            self.assertIn("Selected long-term memories", turn_content[0]["text"])
+            self.assertIn("本轮选取的长期记忆", turn_content[0]["text"])
             self.assertIn("explain the call chain first", turn_content[0]["text"])
             self.assertEqual(turn_content[1]["text"], "Explain agent.py")
-            self.assertNotIn("Selected long-term memories", client.calls[1]["system"])
-            self.assertNotIn("Available memories:", client.calls[1]["system"])
+            self.assertNotIn("本轮选取的长期记忆", client.calls[1]["system"])
+            self.assertNotIn("可用记忆：", client.calls[1]["system"])
 
     def test_memory_selection_runs_once_during_tool_loop(self) -> None:
         class SelectionClient:

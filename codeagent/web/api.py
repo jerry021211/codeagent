@@ -21,6 +21,8 @@ try:  # Keep the core/CLI package importable without optional web dependencies.
     from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
     from codeagent.web.schemas import (
+        AnswerQuestionRequest,
+        UserQuestionResponse,
         ApprovalDecisionRequest,
         ApprovalResponse,
         AttemptPlanDecisionRequest,
@@ -147,6 +149,7 @@ def create_app(
                     data_paths=data_paths,
                     memory_access=memory_access,
                 ),
+                max_concurrent_runs=runtime_env.web_max_concurrent_runs,
             )
     except (ImportError, RuntimeError) as exc:
         if owns_repository and repo is not None:
@@ -348,8 +351,9 @@ def create_app(
     @app.get("/api/workspaces", response_model=WorkspaceListingResponse)
     def list_workspaces(
         path: str | None = Query(default=None, max_length=4096),
+        query: str | None = Query(default=None, max_length=4096),
     ) -> WorkspaceListingResponse:
-        listing = workspace_catalog.list(path)
+        listing = workspace_catalog.list(path, query=query)
         return WorkspaceListingResponse(
             current=listing.current,
             parent=listing.parent,
@@ -460,6 +464,21 @@ def create_app(
     def list_messages(conversation_id: str) -> list[MessageResponse]:
         _require_conversation(repo, conversation_id)
         return [_message_response(item) for item in repo.list_messages(conversation_id)]
+
+    @app.get("/api/runs/{run_id}/activity")
+    def run_activity(
+        run_id: str,
+        after: int = Query(default=0, ge=0),
+        limit: int = Query(default=200, ge=1, le=500),
+    ) -> dict[str, Any]:
+        run = _require_run(repo, run_id)
+        events = repo.list_events(run_id, after_seq=after, limit=limit + 1, activity_only=True)
+        page = events[:limit]
+        return {
+            "run_id": run.id, "status": run.status,
+            "events": [event.to_dict() for event in page],
+            "next_after": page[-1].seq if len(events) > limit else None,
+        }
 
     @app.get("/api/task-lists", response_model=list[TaskListResponse])
     def list_task_lists(
@@ -672,12 +691,24 @@ def create_app(
         content = body.content.strip()
         if not content:
             raise HTTPException(status_code=422, detail="Run content cannot be blank.")
+        if body.mode == "discuss" and (
+            body.useTeam or repo.get_active_team_run_for_conversation(conversation_id)
+        ):
+            raise HTTPException(status_code=409, detail="Discuss 模式不能启动或接管正在运行的 Team；请使用普通会话。")
         if body.useTeam and not team_enabled:
             raise HTTPException(
                 status_code=409,
                 detail="Agent Team is disabled by the current Runtime configuration.",
             )
-        run = scheduler.submit(conversation_id, content, use_team=body.useTeam)
+        if not team_enabled and repo.get_active_team_run_for_conversation(conversation_id):
+            raise HTTPException(
+                status_code=409,
+                detail="Team 功能已关闭，此会话仍关联未结束的 Team。请新建普通会话；原 Team 记录和现场保持不变。",
+            )
+        options = {"use_team": body.useTeam}
+        if body.mode == "discuss":
+            options["mode"] = body.mode
+        run = scheduler.submit(conversation_id, content, **options)
         return CreateRunResponse(
             run_id=run.id,
             status=run.status,
@@ -692,6 +723,14 @@ def create_app(
     def cancel_run(run_id: str) -> RunResponse:
         _require_run(repo, run_id)
         return _run_response(repo, scheduler.cancel(run_id))
+
+    @app.get("/api/runs/{run_id}/questions", response_model=list[UserQuestionResponse])
+    def list_questions(run_id: str):
+        return repo.list_user_questions(run_id)
+
+    @app.post("/api/runs/{run_id}/questions/{question_id}/answer", response_model=UserQuestionResponse)
+    def answer_question(run_id: str, question_id: str, body: AnswerQuestionRequest):
+        return repo.answer_user_question(run_id, question_id, body.answer)
 
     @app.post(
         "/api/runs/{run_id}/approvals/{approval_id}",
@@ -727,26 +766,30 @@ def create_app(
                     repo.list_events,
                     run_id,
                     after_seq=cursor,
+                    limit=500,
                 )
                 if not events:
                     current = repo.get_run(run_id)
-                    if current is None or current.status in TERMINAL_RUN_STATUSES:
-                        return
-                    events = await asyncio.to_thread(
-                        repo.wait_for_events,
-                        run_id,
-                        cursor,
-                        _HEARTBEAT_SECONDS,
-                    )
+                    pending = getattr(scheduler, "is_run_pending", lambda _run_id: False)(run_id)
+                    if current is None or (current.status in TERMINAL_RUN_STATUSES and not pending):
+                        # Status can be committed before the final event. Once the
+                        # worker has released the Run, take one final durable read.
+                        events = await asyncio.to_thread(repo.list_events, run_id, after_seq=cursor, limit=500)
+                        if not events:
+                            payload = {"run_id": run_id, "last_seq": cursor, "status": current.status if current else "interrupted"}
+                            yield f"event: stream.end\ndata: {json.dumps(payload)}\n\n"
+                            return
+                    else:
+                        events = await asyncio.to_thread(
+                            repo.wait_for_events,
+                            run_id,
+                            cursor,
+                            0.1 if current.status in TERMINAL_RUN_STATUSES else _HEARTBEAT_SECONDS,
+                        )
                 for event in events:
                     cursor = max(cursor, event.seq)
                     yield _encode_sse(event.seq, event.type, event.to_dict())
 
-                run = repo.get_run(run_id)
-                if run is None or run.status in TERMINAL_RUN_STATUSES:
-                    # wait_for_events returns every event after the cursor; once
-                    # terminal, the durable stream is therefore fully drained.
-                    return
                 if not events:
                     yield ": heartbeat\n\n"
 
@@ -1399,7 +1442,11 @@ def _conversation_response(
         **record.to_dict(),
         last_message=_message_preview(messages[-1]) if messages else None,
         active_run_id=active_run.id if active_run else None,
+        latest_run_id=latest_run.id if latest_run else None,
         run_status=latest_run.status if latest_run else None,
+        waiting_for_answer=bool(active_run and any(
+            item["status"] == "pending" for item in repository.list_user_questions(active_run.id)
+        )),
     )
 
 

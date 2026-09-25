@@ -29,6 +29,7 @@ class AnthropicModelClient:
     call_kind: str = "main"
     sdk_client: Any | None = None
     activity: ExecutionActivity | None = None
+    request_timeout: float | None = None
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -58,7 +59,7 @@ class AnthropicModelClient:
         system: str,
         messages: list[Message],
         tools: list[dict[str, Any]],
-        max_tokens: int,
+        max_tokens: int | None = None,
     ) -> ModelResponse:
         call_id = f"call_{uuid4().hex}"
         started_at = time.monotonic()
@@ -67,8 +68,9 @@ class AnthropicModelClient:
             "system": system,
             "messages": messages,
             "tools": tools,
-            "max_tokens": max_tokens,
         }
+        if max_tokens is not None:
+            params["max_tokens"] = max_tokens
         self._emit(
             "model.started",
             {
@@ -87,6 +89,7 @@ class AnthropicModelClient:
             inputs={**params, "stream": self.stream},
             metadata={
                 "model": model,
+                "call_kind": self.call_kind,
                 "base_url": self.base_url,
                 "tool_count": len(tools),
             },
@@ -98,13 +101,25 @@ class AnthropicModelClient:
                 client = self._client
                 if self.activity is not None:
                     client = client.with_options(
-                        max_retries=0, timeout=self.activity.request_timeout()
+                        max_retries=0, timeout=min(self.activity.request_timeout(), self.request_timeout)
+                        if self.request_timeout is not None else self.activity.request_timeout()
                     )
+                elif self.request_timeout is not None:
+                    client = client.with_options(max_retries=0, timeout=self.request_timeout)
                 if self.stream:
                     response = self._create_streaming_message(params, call_id=call_id, client=client)
                 else:
+                    if max_tokens is None:
+                        # messages.create requires max_tokens in the Python SDK.
+                        # Compatible endpoints can supply their own output default;
+                        # post preserves SDK auth, transport, timeout and parsing
+                        # without sending a fabricated token cap (or JSON null).
+                        from anthropic.types import Message as AnthropicMessage
+                        raw_response = client.post("/v1/messages", body=params, cast_to=AnthropicMessage)
+                    else:
+                        raw_response = client.messages.create(**params)
                     response = self._message_to_response(
-                        client.messages.create(**params),
+                        raw_response,
                         model=model,
                         call_kind=self.call_kind,
                     )
@@ -182,6 +197,7 @@ class AnthropicModelClient:
             call_kind=self.call_kind if call_kind is None else call_kind,
             sdk_client=self._client,
             activity=self.activity,
+            request_timeout=self.request_timeout,
         )
 
     def _create_streaming_message(

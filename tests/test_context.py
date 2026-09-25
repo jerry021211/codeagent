@@ -8,7 +8,6 @@ from codeagent.context import (
     ContextCompactionError,
     ContextConfig,
     ContextManager,
-    RuntimeState,
 )
 from codeagent.messages import ToolUse
 
@@ -86,26 +85,36 @@ class ContextManagerTests(unittest.TestCase):
                 "count": 3,
             }
 
+            messages = [
+                {"role": "user" if i % 2 == 0 else "assistant", "content": f"inspect a.py {i}"}
+                for i in range(28)
+            ]
             first = manager.compact_history(
-                [{"role": "user", "content": "inspect a.py"}],
+                messages,
                 reason="auto_compact",
                 client=client,
             )
+            messages.extend([
+                {"role": "user" if i % 2 == 0 else "assistant", "content": f"continue {i}"}
+                for i in range(16)
+            ])
             second = manager.compact_history(
-                first + [{"role": "user", "content": "continue"}],
+                messages,
                 reason="manual_compact",
                 client=client,
             )
 
-            self.assertIn('generation="1"', first[0]["content"])
-            self.assertIn('generation="2"', second[0]["content"])
+            self.assertIn('revision="1"', first[0]["content"])
+            self.assertIn('revision="2"', second[0]["content"])
+            self.assertEqual(len(messages), 44)
+            self.assertEqual(manager.state.compacted_message_count, 32)
             self.assertEqual(manager.state.history_generation, 2)
             self.assertIn("<previous-summary>", client.calls[1]["messages"][0]["content"])
             self.assertIn('"count": 3', client.calls[0]["messages"][0]["content"])
             self.assertIn('"status":"pending"', client.calls[0]["messages"][0]["content"])
             self.assertEqual(client.calls[0]["model"], "summary-model")
             self.assertEqual(client.calls[0]["tools"], [])
-            self.assertEqual(client.calls[0]["max_tokens"], 4000)
+            self.assertNotIn("max_tokens", client.calls[0])
             self.assertEqual(len(list((Path(temp_dir) / "transcripts").glob("*.jsonl"))), 2)
 
     def test_summary_failure_keeps_history_and_generation(self) -> None:
@@ -120,7 +129,8 @@ class ContextManagerTests(unittest.TestCase):
                     transcript_dir=Path(temp_dir) / "transcripts",
                 )
             )
-            messages = [{"role": "user", "content": "important history"}]
+            messages = [{"role": "user" if i % 2 == 0 else "assistant", "content": "important history"}
+                        for i in range(28)]
 
             with self.assertRaises(ContextCompactionError):
                 manager.compact_history(
@@ -129,7 +139,8 @@ class ContextManagerTests(unittest.TestCase):
                     client=FailingClient(),
                 )
 
-            self.assertEqual(messages, [{"role": "user", "content": "important history"}])
+            self.assertEqual(len(messages), 28)
+            self.assertTrue(all(m["content"] == "important history" for m in messages))
             self.assertEqual(manager.state.history_generation, 0)
             self.assertFalse((Path(temp_dir) / "transcripts").exists())
 

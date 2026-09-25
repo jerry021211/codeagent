@@ -87,6 +87,7 @@ class HistoryObserverTests(unittest.TestCase):
             ),
             context=ContextManager(
                 config=ContextConfig(
+                    mode="off",
                     summarization_model="summary-model",
                     compact_threshold_chars=1_000_000,
                 )

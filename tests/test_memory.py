@@ -229,7 +229,7 @@ class MemoryManagerTests(unittest.TestCase):
                 max_tokens=8000,
             )
 
-            self.assertIn("Selected long-term memories", context)
+            self.assertIn("本轮选取的长期记忆", context)
             self.assertIn('file="project-style.md"', context)
             self.assertIn("Always explain the call chain first", context)
 

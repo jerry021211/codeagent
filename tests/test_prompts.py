@@ -15,12 +15,12 @@ class PromptRuntimeTests(unittest.TestCase):
                 mode=mode,
                 tool_schemas=[{"name": "search_memory"}, {"name": "load_memory"}],
             )
-            self.assertIn("Search or load memories", result.system_prompt)
+            self.assertIn("按需搜索或加载长期记忆", result.system_prompt)
             self.assertNotIn("`remember`", result.system_prompt)
         writable = runtime.assemble(
             mode=PromptMode.NORMAL, tool_schemas=[{"name": "remember"}],
         )
-        self.assertIn("Use `remember`", writable.system_prompt)
+        self.assertIn("仅用 `remember`", writable.system_prompt)
 
     def test_runtime_warns_when_restored_tool_schema_changed(self) -> None:
         result = PromptRuntime(workspace=Path.cwd()).assemble(
@@ -30,7 +30,7 @@ class PromptRuntimeTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "available tool schemas changed since the previous turn",
+            "工具 schema 相比上次调用已变化",
             result.system_prompt,
         )
         self.assertIn("tools.changed", [item.id for item in result.trace])
@@ -45,29 +45,31 @@ class PromptRuntimeTests(unittest.TestCase):
                 {"name": "subagent"},
                 {"name": "load_skill"},
             ],
-            skill_catalog="Available skills:\n- python-refactor: Refactor Python.",
+            skill_catalog="可用技能：\n- python-refactor: Refactor Python.",
         )
 
-        self.assertIn("interactive coding agent", result.system_prompt)
-        self.assertIn("call todo_write before", result.system_prompt)
-        self.assertIn("Use the subagent tool", result.system_prompt)
-        self.assertIn("independent, bounded work unit", result.system_prompt)
-        self.assertIn("final integration", result.system_prompt)
-        self.assertIn("Diagnose a failed assignment", result.system_prompt)
-        self.assertIn("Available skills:", result.system_prompt)
-        self.assertIn("Current workspace:", result.system_prompt)
+        self.assertIn("交互式编程助手", result.system_prompt)
+        self.assertIn("使用 todo_write", result.system_prompt)
+        self.assertIn("subagent 工具用于", result.system_prompt)
+        self.assertIn("独立且边界明确", result.system_prompt)
+        self.assertIn("最终集成", result.system_prompt)
+        self.assertIn("分配失败时先诊断", result.system_prompt)
+        self.assertIn("可用技能：", result.system_prompt)
+        self.assertIn("当前工作区：", result.system_prompt)
         self.assertEqual(
             [item.id for item in result.trace],
             [
+                "base.core",
                 "base.identity",
                 "base.execution",
                 "tools.todo",
                 "tools.subagent",
+                "skills.guidance",
                 "skills.catalog",
                 "runtime.reminder",
             ],
         )
-        self.assertEqual(result.trace[0].source, "templates/identity.md")
+        self.assertEqual(result.trace[0].source, "templates/core.md")
 
         repeated = runtime.assemble(
             mode=PromptMode.NORMAL,
@@ -76,7 +78,7 @@ class PromptRuntimeTests(unittest.TestCase):
                 {"name": "subagent"},
                 {"name": "load_skill"},
             ],
-            skill_catalog="Available skills:\n- python-refactor: Refactor Python.",
+            skill_catalog="可用技能：\n- python-refactor: Refactor Python.",
         )
         self.assertEqual(repeated.system_prompt, result.system_prompt)
         self.assertEqual(repeated.prompt_hash, result.prompt_hash)
@@ -89,10 +91,10 @@ class PromptRuntimeTests(unittest.TestCase):
             tool_schemas=[{"name": "subagent"}, {"name": "read_file"}],
         )
 
-        self.assertIn("focused coding Subagent", result.system_prompt)
-        self.assertIn("edit only when explicitly requested", result.system_prompt)
-        self.assertIn("## Outcome", result.system_prompt)
-        self.assertNotIn("Use the subagent tool", result.system_prompt)
+        self.assertIn("编程子助手", result.system_prompt)
+        self.assertIn("仅在明确要求时修改文件", result.system_prompt)
+        self.assertIn("## 结果", result.system_prompt)
+        self.assertNotIn("subagent 工具用于", result.system_prompt)
 
     def test_team_roles_receive_distinct_runtime_prompts(self) -> None:
         runtime = PromptRuntime(workspace=Path.cwd())
@@ -139,11 +141,11 @@ class PromptRuntimeTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn("Perform the work directly in this conversation", result.system_prompt)
-        self.assertIn("2 to 5 finishable phase tasks", result.system_prompt)
-        self.assertIn("TaskCreate blockedBy", result.system_prompt)
-        self.assertIn("both subject and description", result.system_prompt)
-        self.assertNotIn("call todo_write before", result.system_prompt)
+        self.assertIn("在当前会话直接完成工作", result.system_prompt)
+        self.assertIn("少量可完成的阶段", result.system_prompt)
+        self.assertIn("blockedBy", result.system_prompt)
+        self.assertIn("subject 和 description", result.system_prompt)
+        self.assertNotIn("使用 todo_write", result.system_prompt)
 
     def test_team_planner_has_distinct_concise_guidance(self) -> None:
         result = PromptRuntime(workspace=Path.cwd()).assemble(
@@ -191,7 +193,7 @@ class PromptRuntimeTests(unittest.TestCase):
             )
 
             self.assertNotIn("CUSTOM TODO TEMPLATE", result.system_prompt)
-            self.assertIn("call todo_write before", result.system_prompt)
+            self.assertIn("使用 todo_write", result.system_prompt)
 
     def test_project_instructions_are_appended_without_replacing_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -212,7 +214,8 @@ class PromptRuntimeTests(unittest.TestCase):
                 tool_schemas=[],
             )
 
-            self.assertTrue(result.system_prompt.startswith("You are an interactive"))
+            self.assertTrue(result.system_prompt.startswith("## 范围与权限"))
+            self.assertIn("交互式编程助手", result.system_prompt)
             self.assertNotIn("PROJECT CODING AGENT", result.system_prompt)
             self.assertIn("Use the project's public API conventions.", result.system_prompt)
             self.assertIn("project.instructions", [item.id for item in result.trace])
@@ -229,7 +232,7 @@ class PromptRuntimeTests(unittest.TestCase):
         self.assertNotIn("memory catalog", result.system_prompt)
         self.assertIn("memory.selected", [item.id for item in result.trace])
 
-    def test_dynamic_budget_clips_low_priority_runtime_content(self) -> None:
+    def test_dynamic_budget_preserves_runtime_and_drops_atomic_memory(self) -> None:
         runtime = PromptRuntime(
             workspace=Path.cwd(),
             config=PromptConfig(dynamic_budget_chars=200),
@@ -245,7 +248,11 @@ class PromptRuntimeTests(unittest.TestCase):
             sum(item.chars for item in result.trace if item.section == "dynamic"),
             200,
         )
-        self.assertTrue(any(item.clipped for item in result.trace))
+        self.assertIn("当前工作区：", result.system_prompt)
+        memory = next(item for item in result.trace if item.id == "memory.selected")
+        self.assertFalse(memory.included)
+        self.assertEqual(memory.dropped_reason, "budget")
+        self.assertNotIn("<selected_memories>", result.system_prompt)
 
 
 if __name__ == "__main__":

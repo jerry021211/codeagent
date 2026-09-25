@@ -30,10 +30,26 @@ class UpdateConversationRequest(ApiModel):
 class CreateRunRequest(ApiModel):
     content: str = Field(min_length=1, max_length=200_000)
     useTeam: bool = False
+    mode: Literal["normal", "discuss"] = "normal"
 
 
 class ApprovalDecisionRequest(ApiModel):
     decision: Literal["allow", "deny"]
+
+
+class AnswerQuestionRequest(ApiModel):
+    answer: str = Field(min_length=1, max_length=20000)
+
+
+class UserQuestionResponse(ApiModel):
+    id: str
+    run_id: str
+    question: str
+    options: list[str]
+    answer: str | None = None
+    status: Literal["pending", "answered", "cancelled"]
+    created_at: str
+    resolved_at: str | None = None
 
 
 class ConversationResponse(ApiModel):
@@ -45,7 +61,9 @@ class ConversationResponse(ApiModel):
     archived_at: str | None = None
     last_message: str | None = None
     active_run_id: str | None = None
+    latest_run_id: str | None = None
     run_status: str | None = None
+    waiting_for_answer: bool = False
     active_task_list_id: str | None = None
 
 

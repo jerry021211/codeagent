@@ -6,7 +6,7 @@ import logging
 import math
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Callable, Iterator
 
@@ -49,6 +49,7 @@ class ExecutionActivity:
         self.model_timeout = model_timeout
         self.clock = clock
         self.on_activity: Callable[[str], None] | None = None
+        self.execution_budget = None
         self._lock = threading.RLock()
         self._operations: list[_Operation] = []
         self._last_activity = clock()
@@ -63,7 +64,9 @@ class ExecutionActivity:
         try:
             self.touch()
             self.check()
-            yield
+            with (self.execution_budget.paused() if self.execution_budget is not None
+                  and kind in {"approval", "user_input"} else nullcontext()):
+                yield
             self.check()
         finally:
             with self._lock:
@@ -100,6 +103,7 @@ class ExecutionActivity:
                     "tool": "tool_executing",
                     "retry": "model_retry_wait",
                     "approval": "permission_waiting",
+                    "user_input": "user_input_waiting",
                 }[current.kind]
             report = label != self._last_label or now - self._last_report >= 10
             if report:
@@ -136,6 +140,8 @@ class ExecutionActivity:
 
     def check(self) -> None:
         self.cancellation.raise_if_cancelled()
+        if self.execution_budget is not None:
+            self.execution_budget.check()
         reason = self.timeout_reason()
         if reason is not None:
             self.cancellation.cancel(reason, reason_code=reason)
@@ -146,6 +152,8 @@ class ExecutionActivity:
         self.check()
         with self._lock:
             remaining = min(op.deadline for op in self._operations) - self.clock()
+        if self.execution_budget is not None:
+            remaining = min(remaining, self.execution_budget.remaining_seconds())
         return max(0.001, min(self.response_timeout, remaining))
 
     def set_request_closer(self, close: Callable[[], None] | None) -> None:

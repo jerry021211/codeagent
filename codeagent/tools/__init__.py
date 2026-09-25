@@ -1,6 +1,7 @@
 """Tool abstractions."""
 
 from codeagent.tools.base import Tool, ToolDefinition, ToolHandler
+from codeagent.tools.ask_user import ASK_USER_TOOL_NAME, AskUserTool, terminal_ask_user
 from codeagent.tools.bash import BashTool
 from codeagent.tools.compact import COMPACT_TOOL_NAME, CompactTool
 from codeagent.tools.defaults import create_default_registry, default_tools
@@ -16,7 +17,7 @@ from codeagent.tools.memory import (
     SearchMemoryTool,
 )
 from codeagent.tools.read import ReadFileTool
-from codeagent.tools.runtime_data import LoadToolOutputTool
+from codeagent.tools.runtime_data import LoadContextHistoryTool, LoadToolOutputTool
 from codeagent.tools.registry import ToolRegistry, tool_schema_hash
 from codeagent.tools.skill import LOAD_SKILL_TOOL_NAME, LoadSkillTool
 from codeagent.tools.subagent import SUBAGENT_TOOL_NAME, SubagentTool
@@ -43,6 +44,9 @@ from codeagent.tools.write import WriteFileTool
 from codeagent.tools.workspace import WorkspaceGuard, WorkspaceViolationError
 
 __all__ = [
+    "ASK_USER_TOOL_NAME",
+    "AskUserTool",
+    "terminal_ask_user",
     "BashTool",
     "COMPACT_TOOL_NAME",
     "CompactTool",
@@ -53,6 +57,7 @@ __all__ = [
     "LOAD_MEMORY_TOOL_NAME",
     "LoadSkillTool",
     "LoadMemoryTool",
+    "LoadContextHistoryTool",
     "LoadToolOutputTool",
     "ReadFileTool",
     "REMEMBER_TOOL_NAME",

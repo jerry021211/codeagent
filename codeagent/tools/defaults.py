@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from codeagent.planning import PlanningBackend
 from codeagent.tools.bash import BashTool
+from codeagent.tools.ask_user import AskUserHandler, AskUserTool
 from codeagent.tools.base import Tool
 from codeagent.tools.compact import CompactTool
 from codeagent.tools.edit import EditFileTool
@@ -25,6 +26,7 @@ from codeagent.tools.workspace import WorkspaceGuard
 
 def default_tools(
     *,
+    ask_user_fn: AskUserHandler | None = None,
     todo_store: TodoStore | None = None,
     todo_log: Callable[[str], None] | None = None,
     skill_loader: SkillLoader | None = None,
@@ -59,6 +61,8 @@ def default_tools(
         GlobTool(workspace_guard=workspace_guard),
         GrepTool(workspace_guard=workspace_guard),
     ]
+    if ask_user_fn is not None:
+        tools.append(AskUserTool(ask_user_fn))
     if backend is PlanningBackend.TODO:
         tools.append(TodoWriteTool(store=todo_store or TodoStore(), on_change=todo_log))
     else:
@@ -87,6 +91,7 @@ def default_tools(
 
 def create_default_registry(
     *,
+    ask_user_fn: AskUserHandler | None = None,
     todo_store: TodoStore | None = None,
     todo_log: Callable[[str], None] | None = None,
     skill_loader: SkillLoader | None = None,
@@ -105,6 +110,7 @@ def create_default_registry(
 ) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in default_tools(
+        ask_user_fn=ask_user_fn,
         todo_store=todo_store,
         todo_log=todo_log,
         skill_loader=skill_loader,

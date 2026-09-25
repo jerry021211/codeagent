@@ -59,6 +59,7 @@ class CliPermissionBroker:
     """Synchronous broker used by the interactive CLI."""
 
     prompt: PermissionPrompt = terminal_prompt
+    execution_activity: ExecutionActivity | None = None
 
     def request(
         self,
@@ -74,7 +75,11 @@ class CliPermissionBroker:
         del timeout
         if cancellation is not None:
             cancellation.raise_if_cancelled()
-        allowed = bool(self.prompt(tool_name, dict(tool_input), reason))
+        with (
+            self.execution_activity.operation("approval", float("inf"))
+            if self.execution_activity is not None else nullcontext()
+        ):
+            allowed = bool(self.prompt(tool_name, dict(tool_input), reason))
         if cancellation is not None:
             cancellation.raise_if_cancelled()
         return allowed

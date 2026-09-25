@@ -10,12 +10,14 @@ from uuid import uuid4
 
 from codeagent import (
     Agent,
+    AgentResult,
     ContextManager,
     EnvironmentConfig,
     MemoryManager,
     MemoryStore,
     PlanningBackend,
     PromptRuntime,
+    PromptMode,
     RecoveryRuntime,
     SkillLoader,
     TodoStore,
@@ -29,8 +31,11 @@ from codeagent.memory import (
     MemoryAccessPolicy,
     MemoryWriteBlocked,
 )
+from codeagent.permissions import CliPermissionBroker, PermissionPolicy
 from codeagent.runtime import RuntimeDataPaths
-from codeagent.tools import LoadToolOutputTool
+from codeagent.runtime.execution import is_execution_failure
+from codeagent.tools import LoadContextHistoryTool, LoadToolOutputTool
+from codeagent.tools.ask_user import terminal_ask_user
 from codeagent.web.storage import SQLiteRepository
 
 
@@ -54,6 +59,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--task-list",
         help="Use an existing task list when the tasks backend is active.",
+    )
+    parser.add_argument(
+        "--discuss", action="store_true",
+        help="Start in read-only discussion mode; no edits or planning required.",
     )
     args = parser.parse_args(argv)
 
@@ -152,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     prompt_runtime = PromptRuntime(workspace=workspace, config=env.prompt_config)
     tools = create_default_registry(
+        ask_user_fn=terminal_ask_user,
         todo_store=todo_store,
         todo_log=print,
         skill_loader=skill_loader,
@@ -162,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         task_list_id=task_list_id,
     )
     tools.register(LoadToolOutputTool(context_config.tool_output_dir))
+    tools.register(LoadContextHistoryTool(context_config.transcript_dir))
     mcp_path = (
         env.mcp_config_path
         if env.mcp_config_path.is_absolute()
@@ -169,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     mcp_router = McpRouter(mcp_path)
     mcp_router.register_tools(tools)
+    permission_broker = CliPermissionBroker()
 
     agent = Agent(
         client=env.create_anthropic_client(
@@ -177,7 +189,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         tools=tools,
         config=env.to_agent_config(planning_backend=planning_backend),
+        prompt_mode=PromptMode.DISCUSS if args.discuss else PromptMode.NORMAL,
         hooks=create_default_hooks(
+            permission_policy=PermissionPolicy(workspace=workspace, broker=permission_broker),
             workspace=workspace,
             todo_store=todo_store,
             planning_backend=planning_backend,
@@ -188,12 +202,14 @@ def main(argv: list[str] | None = None) -> int:
         prompt_runtime=prompt_runtime,
         prompt_log=print if env.prompt_config.emit_trace else None,
         recovery_runtime=recovery_runtime,
+        permission_broker=permission_broker,
         subagent_environment_factory=lambda: create_default_subagent_environment(
             workspace,
             skill_loader,
             memory_store,
             env,
             context_root,
+            permission_broker=permission_broker,
         ),
         subagent_log=print,
         skill_catalog=skill_catalog,
@@ -203,16 +219,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if query:
             result = agent.run(query)
-            if not stream and result.final_text:
-                print(result.final_text)
-            elif stream:
-                print()
-            return 0
+            print_run_result(result, stream=stream)
+            return 1 if is_execution_failure(result.stop_reason) else 0
 
-        print("codeagent interactive mode. Type q, quit, or exit to stop.")
+        print("codeagent interactive mode. Type /discuss to toggle read-only discussion; q, quit, or exit to stop.")
         while True:
             try:
-                user_input = input("> ").strip()
+                user_input = input("[discuss] > " if agent.discuss_mode else "> ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
@@ -221,16 +234,28 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if not user_input:
                 continue
+            if user_input.lower() in {"/discuss", "/discuss on", "/discuss off"}:
+                enabled = (
+                    not agent.discuss_mode if user_input.lower() == "/discuss"
+                    else user_input.lower().endswith(" on")
+                )
+                agent.set_discuss_mode(enabled)
+                print("Discuss mode ON — read only." if enabled else "Discuss mode OFF — normal permissions restored.")
+                continue
 
             result = agent.run(user_input)
-            if not stream and result.final_text:
-                print(result.final_text)
-            elif stream:
-                print()
+            print_run_result(result, stream=stream)
     finally:
         mcp_router.close()
         if runtime_repository is not None:
             runtime_repository.close()
+
+
+def print_run_result(result: AgentResult, *, stream: bool) -> None:
+    if stream:
+        print()
+    if result.final_text and (not stream or is_execution_failure(result.stop_reason)):
+        print(result.final_text)
 
 
 def print_stream_token(token: str) -> None:
@@ -238,13 +263,13 @@ def print_stream_token(token: str) -> None:
 
 
 def create_skill_loader(env: EnvironmentConfig, workspace: Path) -> SkillLoader | None:
+    """Load the shared library; workspace is retained for caller compatibility."""
+
     if not env.enable_skills:
         return None
 
-    roots = [
-        root if root.is_absolute() else workspace / root
-        for root in env.skill_roots
-    ]
+    data_paths = RuntimeDataPaths(env.data_dir)
+    roots = [data_paths.skill_root(root) for root in env.skill_roots]
     return SkillLoader(roots=roots)
 
 
@@ -281,6 +306,7 @@ def create_default_subagent_environment(
     memory_store: MemoryStore | None,
     env: EnvironmentConfig,
     context_root: Path,
+    permission_broker: CliPermissionBroker | None = None,
 ):
     todo_store = TodoStore()
     subagent_root = context_root / "subagents" / uuid4().hex
@@ -298,10 +324,15 @@ def create_default_subagent_environment(
         memory_max_items=env.memory_config.max_loaded_items,
     )
     tools.register(LoadToolOutputTool(context_config.tool_output_dir))
+    tools.register(LoadContextHistoryTool(context_config.transcript_dir))
     context = ContextManager(config=context_config, todo_store=todo_store)
     return (
         tools,
-        create_default_hooks(workspace=workspace, todo_store=todo_store),
+        create_default_hooks(
+            workspace=workspace,
+            todo_store=todo_store,
+            permission_policy=PermissionPolicy(workspace=workspace, broker=permission_broker),
+        ),
         context,
     )
 

@@ -203,8 +203,10 @@ class HookedAgentTests(unittest.TestCase):
 
         reminder = hook(messages)
 
-        self.assertIsNotNone(reminder)
-        self.assertIn("todo_write", reminder)
+        self.assertIsNone(reminder)
+        store.replace([{"content": "修改并验证", "status": "in_progress"}])
+        self.assertIsNone(hook(messages))
+        self.assertIn("todo_write", hook(messages))
 
     def test_todo_reminder_resets_after_todo_update(self) -> None:
         store = TodoStore()
@@ -248,7 +250,7 @@ class HookedAgentTests(unittest.TestCase):
 
         self.assertIsNotNone(reminder)
         self.assertIn("Review storage", reminder)
-        self.assertIn("not been updated for 2 model calls", reminder)
+        self.assertIn("连续 2 次模型调用未更新", reminder)
 
     def test_task_reminder_resets_after_task_update(self) -> None:
         hook = create_task_reminder_hook(

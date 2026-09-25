@@ -54,10 +54,12 @@ class HistoryObserver:
     ) -> None:
         self._generation = generation
         self._last_sent = deepcopy(last_sent) if last_sent is not None else None
+        self._last_hash = _history_hash(self._last_sent) if self._last_sent is not None else None
 
     def restore(self, *, generation: int, last_sent: list[Message]) -> None:
         self._generation = generation
         self._last_sent = deepcopy(last_sent)
+        self._last_hash = _history_hash(self._last_sent)
 
     def observe(
         self,
@@ -88,6 +90,7 @@ class HistoryObserver:
                 current_history_hash=current_hash,
             )
             self._last_sent = current
+            self._last_hash = current_hash
             return observation
 
         common_prefix = _common_prefix_length(previous, current)
@@ -99,7 +102,7 @@ class HistoryObserver:
                 applied_reason = generation_reason or "unexpected_prefix_change"
             else:
                 self._generation += 1
-                applied_reason = "unexpected_prefix_change"
+                applied_reason = generation_reason or "unexpected_prefix_change"
 
         observation = HistoryObservation(
             generation=self._generation,
@@ -112,10 +115,11 @@ class HistoryObserver:
             common_prefix_messages=common_prefix,
             previous_suffix_messages=max(0, len(previous) - common_prefix),
             current_suffix_messages=max(0, len(current) - common_prefix),
-            previous_history_hash=_history_hash(previous),
+            previous_history_hash=self._last_hash,
             current_history_hash=current_hash,
         )
         self._last_sent = current
+        self._last_hash = current_hash
         return observation
 
 

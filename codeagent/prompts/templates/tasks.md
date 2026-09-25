@@ -1,9 +1,8 @@
-Use persistent Tasks only for meaningful multi-step work, not single reads or commands.
+只有需要持续跟踪多个有意义阶段的工作才使用 Tasks；简单读取、命令或小范围独立修改不强制建任务。
 
-- Call TaskList first. For broad work, create 2 to 5 finishable phase tasks.
-- TaskList returns summaries only. Before executing a listed Task, use TaskGet with its taskId to read the full description, completion conditions, and metadata.
-- Every TaskCreate needs both subject and description; include verifiable completion conditions.
-- Create prerequisites first and express dependencies with TaskCreate blockedBy.
-- Before working on a ready Task, set it to in_progress. Keep at most one Task in progress.
-- Perform the work directly in this conversation, then mark the phase completed before moving on.
-- A blocked Task cannot start or complete. The Root Agent owns Task updates even when a Subagent helps.
+- 使用前先 TaskList，复用相关任务；较大工作拆成少量可完成的阶段。
+- TaskList 只给摘要；执行已有任务前用 TaskGet 读取完整要求、验收条件和元数据。
+- TaskCreate 提供 subject 和 description，写明可验证的完成条件；先创建前置任务，再用 blockedBy 表达依赖。
+- 开始可执行任务前设为 in_progress，最多一个任务处于进行中。
+- 在当前会话直接完成工作，达到验收条件后标为 completed，再推进下一阶段。
+- 被依赖阻塞的任务不能开始或完成；用户的新说明只有明确改变任务时才更新要求。

@@ -61,21 +61,28 @@ class McpRouter:
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._startup_error: BaseException | None = None
+        self._lifecycle_lock = threading.RLock()
+        self._closed = False
 
     def start(self) -> None:
-        if not self.servers or self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._thread_main,
-            name="codeagent-mcp",
-            daemon=True,
-        )
-        self._thread.start()
-        self._ready.wait()
-        if self._startup_error is not None:
-            raise RuntimeError(
-                f"MCP startup failed: {self._startup_error}"
-            ) from self._startup_error
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("MCP router is closed")
+            if not self.servers:
+                return
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._thread_main,
+                    name="codeagent-mcp",
+                    daemon=True,
+                )
+                self._thread.start()
+            # Every caller must observe completed discovery, including failures.
+            self._ready.wait()
+            if self._startup_error is not None:
+                raise RuntimeError(
+                    f"MCP startup failed: {self._startup_error}"
+                ) from self._startup_error
 
     def register_tools(self, registry: ToolRegistry) -> None:
         self.start()
@@ -98,12 +105,16 @@ class McpRouter:
         return f"Error: {output}" if result.is_error else output
 
     def close(self) -> None:
-        if self._loop is not None and self._stop_event is not None:
-            self._loop.call_soon_threadsafe(self._stop_event.set)
-        if self._thread is not None:
-            self._thread.join()
-        self._thread = None
-        self._loop = None
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            if self._loop is not None and not self._loop.is_closed() and self._stop_event is not None:
+                self._loop.call_soon_threadsafe(self._stop_event.set)
+            if self._thread is not None:
+                self._thread.join()
+            self._thread = None
+            self._loop = None
+            self._closed = True
 
     def __enter__(self) -> "McpRouter":
         self.start()

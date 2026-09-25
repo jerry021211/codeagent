@@ -1,1 +1,1 @@
-Current date: {current_date}
+当前日期：{current_date}

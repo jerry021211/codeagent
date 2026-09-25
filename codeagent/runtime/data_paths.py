@@ -90,6 +90,14 @@ class RuntimeDataPaths:
     def state_database(self) -> Path:
         return self.root / "state" / "state.db"
 
+    def skill_root(self, configured: str | Path = "skills") -> Path:
+        """Resolve a shared skill library independently of any workspace."""
+
+        candidate = Path(configured).expanduser()
+        return (
+            candidate if candidate.is_absolute() else self.root / candidate
+        ).resolve()
+
     def worktree_root(self, configured: str | Path) -> Path:
         candidate = Path(configured).expanduser()
         return candidate.resolve() if candidate.is_absolute() else self.root / candidate

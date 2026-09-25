@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import time
+import json
+from collections import Counter
+from copy import deepcopy
 from contextlib import nullcontext
 
 from codeagent.events import EventEmitter
-from codeagent.messages import Message
+from codeagent.messages import Message, _field
 from codeagent.models import ModelResponse
 from codeagent.recovery.classifier import (
     classify_exception,
@@ -30,8 +33,13 @@ from codeagent.runtime.activity import ExecutionActivity
 from codeagent.runtime.cancellation import CancelledError
 
 CONTINUATION_PROMPT = (
-    "Output token limit hit. Resume directly. No apology, no recap. "
-    "Pick up mid-thought if needed. Break remaining work into smaller pieces."
+    "[运行时提醒：输出长度] 已达到本次输出上限。直接续写未完成内容，不重复已完成部分。"
+    "必要时将剩余工作拆成较小部分；不要重新执行已产生副作用的操作。"
+)
+
+TRUNCATED_TOOL_RESULT = (
+    "未执行：模型响应因 max_tokens 被截断，工具参数可能不完整。"
+    "Runtime 未调用此工具，未产生本次调用的副作用；如仍需操作，请重新提交完整工具请求。"
 )
 
 
@@ -105,10 +113,18 @@ class RecoveryRuntime:
 
                 if decision.action == RecoveryAction.COMPACT_RETRY:
                     if compact_fn is None:
-                        return self._failed(reason, "No compact function is available.")
-                    compacted = compact_fn(current_messages)
+                        return self._failed(reason, f"{state.last_error}\nNo compact function is available.")
+                    try:
+                        compacted = compact_fn(current_messages)
+                    except CancelledError:
+                        raise
+                    except Exception as compact_error:
+                        return self._failed(reason, (
+                            f"{state.last_error}\nContext compaction failed: "
+                            f"{type(compact_error).__name__}: {compact_error}"
+                        ))
                     if compacted is None:
-                        return self._failed(reason, "Reactive compact failed.")
+                        return self._failed(reason, f"{state.last_error}\nReactive compaction produced no smaller context.")
                     state.reactive_compact_attempted = True
                     current_messages = compacted
                     continue
@@ -151,6 +167,26 @@ class RecoveryRuntime:
         if decision.action != RecoveryAction.CONTINUE:
             self._emit_decision(event_emitter, decision, state)
 
+        blocks = response.content if isinstance(response.content, list) else [response.content]
+        if reason == RecoveryReason.MAX_OUTPUT_TOKENS_ESCALATE and any(
+            _field(block, "type") == "tool_use" for block in blocks
+        ):
+            # Even syntactically valid earlier blocks belong to an unfinished
+            # response. Never dispatch them, including after retry exhaustion.
+            _record_unexecuted_truncated_tools(messages, blocks)
+            if decision.action == RecoveryAction.ESCALATE_TOKENS:
+                state.current_max_tokens = self.config.escalated_max_tokens
+                state.max_tokens_escalated = True
+            elif decision.action == RecoveryAction.CONTINUATION:
+                state.continuation_count += 1
+            else:
+                return RecoveryResponseResult(
+                    failed=True, messages=messages, reason=decision.reason,
+                    error="模型输出持续达到长度上限，工具请求均未执行；输出升级和续写次数已用尽。",
+                )
+            messages.append({"role": "user", "content": CONTINUATION_PROMPT, "_context_source": "runtime"})
+            return RecoveryResponseResult(retry=True, messages=messages, reason=decision.reason)
+
         if decision.action == RecoveryAction.ESCALATE_TOKENS:
             state.current_max_tokens = self.config.escalated_max_tokens
             state.max_tokens_escalated = True
@@ -162,7 +198,7 @@ class RecoveryRuntime:
 
         if decision.action == RecoveryAction.CONTINUATION:
             messages.append({"role": "assistant", "content": response.content})
-            messages.append({"role": "user", "content": CONTINUATION_PROMPT})
+            messages.append({"role": "user", "content": CONTINUATION_PROMPT, "_context_source": "runtime"})
             state.continuation_count += 1
             return RecoveryResponseResult(
                 retry=True,
@@ -189,6 +225,8 @@ class RecoveryRuntime:
         cancellation: CancellationToken | None = None,
     ) -> None:
         if self.config.sleep_enabled and seconds > 0:
+            if self.activity is not None and self.activity.execution_budget is not None:
+                seconds = min(seconds, self.activity.execution_budget.remaining_seconds())
             if cancellation is not None:
                 if cancellation.wait(seconds):
                     cancellation.raise_if_cancelled()
@@ -235,3 +273,42 @@ class RecoveryRuntime:
                 "error": error,
             },
         )
+
+
+def _record_unexecuted_truncated_tools(messages: list[Message], blocks: list) -> None:
+    """Record received evidence with complete protocol pairs and no dispatch.
+
+    Malformed IDs/arguments cannot be replayed as provider tool blocks. Keep
+    those received values as explicitly inert data while preserving normal text.
+    """
+    ids = Counter(
+        _field(block, "id") for block in blocks
+        if _field(block, "type") == "tool_use" and isinstance(_field(block, "id"), str)
+    )
+    content = []
+    results = []
+    for block in blocks:
+        if _field(block, "type") != "tool_use":
+            content.append(deepcopy(block))
+            continue
+        identifier = _field(block, "id")
+        name = _field(block, "name")
+        arguments = _field(block, "input")
+        if (isinstance(identifier, str) and identifier and ids[identifier] == 1
+                and isinstance(name, str) and name and isinstance(arguments, dict)):
+            content.append(deepcopy(block))
+            results.append({
+                "type": "tool_result", "tool_use_id": identifier,
+                "is_error": True, "content": TRUNCATED_TOOL_RESULT,
+            })
+        else:
+            dump = getattr(block, "model_dump", None)
+            received = dump(mode="json") if callable(dump) else block
+            content.append({"type": "text", "text": (
+                "[截断响应中的无效工具请求，仅保存为历史数据；未执行，不是新的工具调用]\n"
+                + json.dumps(received, ensure_ascii=False, default=str)
+            )})
+    additions = [{"role": "assistant", "content": content}]
+    if results:
+        additions.append({"role": "user", "content": results})
+    messages.extend(additions)

@@ -1,1 +1,1 @@
-The available tool schemas changed since the previous turn. The current API-provided schemas are authoritative; ignore stale tool claims in conversation history.
+工具 schema 相比上次调用已变化。调用接口以当前 API 提供的 schema 为准，不沿用历史中过期的工具名称或参数；能否执行仍取决于当前模式和权限检查。

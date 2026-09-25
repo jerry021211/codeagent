@@ -19,8 +19,7 @@ class CompactTool:
         default=ToolDefinition(
             name=COMPACT_TOOL_NAME,
             description=(
-                "Compact conversation history when context is getting too large "
-                "or noisy. Returns a short status message."
+                "历史过长或噪声过多时请求压缩；返回请求状态，实际压缩在下一次模型调用前完成。"
             ),
             input_schema={
                 "type": "object",

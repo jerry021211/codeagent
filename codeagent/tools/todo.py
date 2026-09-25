@@ -34,9 +34,9 @@ class TodoStore:
 
     def format(self) -> str:
         if not self.todos:
-            return "Current todo list is empty."
+            return "当前 TODO 列表为空。"
 
-        lines = ["Current todo list:"]
+        lines = ["当前 TODO 列表："]
         for todo in self.todos:
             marker = {
                 "pending": " ",
@@ -47,25 +47,14 @@ class TodoStore:
         return "\n".join(lines)
 
     def reminder(self) -> str:
-        if not self.todos:
-            return (
-                "<reminder>Before continuing a multi-step task, call todo_write "
-                "with a concise plan. The todo_write tool is planning-only; it "
-                "does not read files, run commands, or make edits.</reminder>"
-            )
-
-        if self.has_open_work():
-            return (
-                "<reminder>Update todo_write before continuing. Mark completed "
-                "items, keep exactly one active item as in_progress, and make "
-                f"sure the next step is clear.\n{self.format()}</reminder>"
-            )
-
+        if not self.has_open_work():
+            return ""
         return (
-            "<reminder>Your todo list is complete. If the task now requires "
-            "verification or a final summary, add or confirm that step with "
-            "todo_write before finishing.</reminder>"
+            "<reminder>检查当前阶段的实际进度，完成后更新 todo_write；"
+            "最多一个步骤为 in_progress，不为更新计划而扩大任务范围。\n"
+            f"{self.format()}</reminder>"
         )
+
 
 
 @dataclass(slots=True)
@@ -78,11 +67,7 @@ class TodoWriteTool:
         default=ToolDefinition(
             name="todo_write",
             description=(
-                "Create or update a planning checklist for the current task. "
-                "Use this before starting multi-step work and update it as "
-                "steps move through pending, in_progress, and completed. "
-                "This tool only records planning state; it cannot read files, "
-                "run commands, or change the workspace."
+                "创建或更新阶段计划，仅在工作需要跟踪有意义阶段时使用。随实际进展更新 pending、in_progress、completed。此工具只记录计划，不读取文件、不执行命令、不修改工作区。"
             ),
             input_schema={
                 "type": "object",
@@ -90,14 +75,14 @@ class TodoWriteTool:
                     "todos": {
                         "type": "array",
                         "description": (
-                            "Full replacement todo list for the current task."
+                            "用于完整替换当前计划的 TODO 列表"
                         ),
                         "items": {
                             "type": "object",
                             "properties": {
                                 "content": {
                                     "type": "string",
-                                    "description": "Concrete task step.",
+                                    "description": "可验收的具体任务步骤",
                                 },
                                 "status": {
                                     "type": "string",
@@ -247,6 +232,7 @@ def create_todo_final_status_hook(store: TodoStore, log: TodoLogger):
         log(final_status)
         return None
 
+    hook.with_todo_store = lambda child_store: create_todo_final_status_hook(child_store, log)
     return hook
 
 
@@ -345,6 +331,7 @@ def create_todo_reminder_hook(
             return None
 
         rounds_since_update = 0
-        return store.reminder()
+        return store.reminder() or None
 
+    hook.with_todo_store = lambda child_store: create_todo_reminder_hook(child_store, interval=interval)
     return hook

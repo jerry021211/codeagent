@@ -27,6 +27,11 @@ class MemoryAccessPolicy:
         self._always_read_only = always_read_only
 
     @contextmanager
+    def reading(self) -> Iterator[None]:
+        with self._lock:
+            yield
+
+    @contextmanager
     def writing(self) -> Iterator[None]:
         with self._lock:
             if self._always_read_only or self._active_team():

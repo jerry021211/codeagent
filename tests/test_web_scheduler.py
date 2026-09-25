@@ -184,6 +184,32 @@ class SchedulerTests(unittest.TestCase):
         self.assertIn("run.completed", event_types)
         self.assertIsNotNone(self.repository.get_checkpoint_for_run(run.id))
 
+    def test_discuss_profile_is_snapshotted_and_next_run_can_exit(self):
+        factory = _FakeFactory()
+        scheduler = RunScheduler(self.repository, factory)
+        try:
+            for mode in ("discuss", "normal"):
+                run = scheduler.submit(self.conversation.id, "inspect", mode=mode)
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    current = self.repository.get_run(run.id)
+                    if current.status in {"completed", "failed"}:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(current.status, "completed")
+                self.assertEqual(current.metadata["agent_profile"], mode)
+            users = [m for m in self.repository.list_messages(self.conversation.id) if m.role == "user"]
+            self.assertEqual([m.metadata["mode"] for m in users], ["discuss", "normal"])
+            self.assertEqual(factory.prompt_modes, [PromptMode.DISCUSS, None])
+        finally:
+            scheduler.stop()
+
+    def test_discuss_rejects_team_before_creating_run(self):
+        scheduler = RunScheduler(self.repository, _FakeFactory())
+        with self.assertRaises(ValueError):
+            scheduler.submit(self.conversation.id, "inspect", mode="discuss", use_team=True)
+        self.assertEqual(self.repository.list_runs(conversation_id=self.conversation.id), [])
+
     def test_run_uses_the_workspace_bound_to_its_conversation(self):
         workspace = str(Path(self.tempdir.name, "project").resolve())
         conversation = self.repository.create_conversation(
@@ -434,7 +460,7 @@ class SchedulerTests(unittest.TestCase):
 
     def test_queued_cancel_is_not_executed_later(self):
         gate = threading.Event()
-        scheduler = RunScheduler(self.repository, _FakeFactory(gate))
+        scheduler = RunScheduler(self.repository, _FakeFactory(gate), max_concurrent_runs=1)
         first = scheduler.submit(self.conversation.id, "first")
         self.assertTrue(gate.wait(1))
         second_conversation = self.repository.create_conversation(title="second")

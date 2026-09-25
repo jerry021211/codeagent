@@ -76,25 +76,24 @@ class TaskCreateTool:
         default=ToolDefinition(
             name="TaskCreate",
             description=(
-                "Create a persistent project task in the current task list. "
-                "Use it for meaningful multi-step work, not tiny execution steps."
+                "在当前任务列表创建有意义的阶段任务，不用于细碎执行步骤。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "subject": {"type": "string", "description": "Concise task title."},
+                    "subject": {"type": "string", "description": "简短任务标题"},
                     "description": {
                         "type": "string",
-                        "description": "Context, requirements, and verifiable completion conditions.",
+                        "description": "上下文、要求和可验证的验收条件",
                     },
                     "activeForm": {
                         "type": "string",
-                        "description": "Short present-progress label shown while in progress.",
+                        "description": "进行中显示的简短进展描述",
                     },
                     "blockedBy": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "IDs of already-created prerequisite tasks.",
+                        "description": "已创建的前置任务 ID",
                     },
                     "metadata": {"type": "object"},
                 },
@@ -133,9 +132,7 @@ class TaskGetTool:
         default=ToolDefinition(
             name="TaskGet",
             description=(
-                "Get one task's full details by taskId from the current task list, "
-                "including its description, completion conditions, and metadata. "
-                "Use after TaskList when you need to inspect or execute a task."
+                "按 taskId 获取完整要求、验收条件和元数据；TaskList 后需要查看或执行任务时使用。"
             ),
             input_schema={
                 "type": "object",
@@ -157,9 +154,7 @@ class TaskListTool:
         default=ToolDefinition(
             name="TaskList",
             description=(
-                "List task summaries in the current task list: id, subject, status, "
-                "owner, blocks, and blockedBy. Descriptions and metadata are omitted; "
-                "use TaskGet with a taskId for full details before executing a task."
+                "列出任务摘要：id、subject、status、owner、blocks、blockedBy。执行前通过 TaskGet 读取完整说明和元数据。"
             ),
             input_schema={
                 "type": "object",
@@ -205,8 +200,7 @@ class TaskUpdateTool:
         default=ToolDefinition(
             name="TaskUpdate",
             description=(
-                "Update one task in the current task list. Claim ready work by setting "
-                "status to in_progress; the harness assigns the current agent as owner."
+                "更新任务；将就绪任务设为 in_progress 时由运行时分配当前执行者。完成状态必须符合实际进展。"
             ),
             input_schema={
                 "type": "object",
@@ -311,11 +305,9 @@ def create_task_reminder_hook(
 
         return "\n".join(
             [
-                "<reminder>Persistent tasks have not been updated for "
-                f"{interval} model calls.",
-                "Review the current stage before continuing. Mark completed work, "
-                "start the next ready stage, and do not expand the investigation "
-                "without a specific remaining gap.",
+                f"<reminder>已有任务连续 {interval} 次模型调用未更新。",
+                "检查当前阶段的实际进展，标记已完成工作并开始下一个就绪阶段；"
+                "没有具体未知问题时，不要扩大调查范围。",
                 open_tasks,
                 "</reminder>",
             ]

@@ -315,6 +315,27 @@ class SQLiteRepository:
         );
         CREATE INDEX IF NOT EXISTS events_replay_idx ON events(run_id, seq);
 
+        CREATE TABLE IF NOT EXISTS user_questions (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            question TEXT NOT NULL,
+            options_json TEXT NOT NULL DEFAULT '[]',
+            answer TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            resolved_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS user_questions_run_idx
+            ON user_questions(run_id, created_at);
+        CREATE TRIGGER IF NOT EXISTS close_run_questions
+        AFTER UPDATE OF status, cancel_requested_at ON runs
+        WHEN NEW.status IN ('completed', 'failed', 'cancelled', 'interrupted')
+             OR NEW.cancel_requested_at IS NOT NULL
+        BEGIN
+            UPDATE user_questions SET status = 'cancelled', resolved_at = NEW.updated_at
+            WHERE run_id = NEW.id AND status = 'pending';
+        END;
+
         CREATE TABLE IF NOT EXISTS approvals (
             id TEXT PRIMARY KEY,
             conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -1077,8 +1098,59 @@ class SQLiteRepository:
 
     def delete_conversation(self, conversation_id: str) -> bool:
         with self._transaction(immediate=True) as connection:
+            if self.get_conversation(conversation_id) is None:
+                return False
+            # Keep the checks and deletion atomic with respect to new submissions.
+            if self.list_runs(conversation_id=conversation_id, statuses=ACTIVE_RUN_STATUSES):
+                raise StorageConflictError("会话中有未结束的任务，请先停止任务再删除。")
+            if self.get_active_team_run_for_conversation(conversation_id) is not None:
+                raise StorageConflictError("会话中有未结束的团队任务，请先停止团队再删除。")
+            pending_worker = connection.execute(
+                "SELECT 1 FROM task_attempts WHERE team_run_id IN "
+                "(SELECT id FROM team_runs WHERE conversation_id = ?) "
+                "AND worker_exited_at IS NULL "
+                "AND state NOT IN ('succeeded', 'failed', 'cancelled', 'orphaned') LIMIT 1",
+                (conversation_id,),
+            ).fetchone()
+            if pending_worker is not None:
+                raise StorageConflictError("团队任务正在停止，请等待子任务退出后再删除。")
+
+            scopes: list[tuple[str, str]] = [("conversation", conversation_id)]
+            for kind, query in (
+                ("run", "SELECT id FROM runs WHERE conversation_id = ?"),
+                ("team", "SELECT id FROM team_runs WHERE conversation_id = ?"),
+                ("session", "SELECT id FROM agent_sessions WHERE team_run_id IN (SELECT id FROM team_runs WHERE conversation_id = ?)"),
+                ("message", "SELECT id FROM team_messages WHERE team_run_id IN (SELECT id FROM team_runs WHERE conversation_id = ?)"),
+                ("task_list", "SELECT id FROM task_lists WHERE origin_conversation_id = ? AND scope = 'conversation_private'"),
+            ):
+                scopes.extend((kind, row[0]) for row in connection.execute(query, (conversation_id,)))
+
+            # These children use RESTRICT references to agents/sessions/plans;
+            # remove them before the conversation's normal cascading deletes.
+            for table in ("tool_executions", "worktree_bindings", "task_attempts"):
+                connection.execute(
+                    f"DELETE FROM {table} WHERE team_run_id IN "
+                    "(SELECT id FROM team_runs WHERE conversation_id = ?)",
+                    (conversation_id,),
+                )
             cursor = connection.execute(
                 "DELETE FROM conversations WHERE id = ?", (conversation_id,)
+            )
+            connection.execute(
+                "DELETE FROM task_lists WHERE origin_conversation_id = ? "
+                "AND scope = 'conversation_private'",
+                (conversation_id,),
+            )
+            connection.execute(
+                "UPDATE tasks SET status = 'pending', owner = NULL, "
+                "revision = revision + 1, updated_at = ? "
+                "WHERE status = 'in_progress' AND substr(owner, 1, ?) = ?",
+                (utc_now_iso(), len(conversation_id) + 1, f"{conversation_id}:"),
+            )
+            # Observation triggers retain copies of deleted rows, including messages.
+            connection.executemany(
+                "DELETE FROM database_changes WHERE scope_kind = ? AND scope_id = ?",
+                scopes,
             )
         return cursor.rowcount > 0
 
@@ -7523,6 +7595,61 @@ class SQLiteRepository:
                 self._dequeue_after(connection, old_position)
         return self._require_run(run_id)
 
+    def create_user_question(self, run_id: str, question: str, options: list[str]) -> JsonObject:
+        question_id = _new_id("question")
+        with self._transaction(immediate=True) as connection:
+            run = self._require_run(run_id)
+            if run.status != "running" or run.cancel_requested_at:
+                raise StorageConflictError("Run is not accepting questions")
+            connection.execute(
+                "INSERT INTO user_questions(id, run_id, question, options_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (question_id, run_id, question, _json_dumps(options), utc_now_iso()),
+            )
+        return self.get_user_question(run_id, question_id)
+
+    def get_user_question(self, run_id: str, question_id: str) -> JsonObject:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM user_questions WHERE id = ? AND run_id = ?", (question_id, run_id)
+            ).fetchone()
+        if row is None:
+            raise RecordNotFoundError(f"Question not found: {question_id}")
+        result = dict(row)
+        result["options"] = json.loads(result.pop("options_json"))
+        return result
+
+    def list_user_questions(self, run_id: str) -> list[JsonObject]:
+        with self._lock:
+            self._require_run(run_id)
+            rows = self._connection.execute(
+                "SELECT id FROM user_questions WHERE run_id = ? ORDER BY created_at, id", (run_id,)
+            ).fetchall()
+            return [self.get_user_question(run_id, row["id"]) for row in rows]
+
+    def answer_user_question(self, run_id: str, question_id: str, answer: str) -> JsonObject:
+        if not isinstance(answer, str) or not answer.strip() or len(answer) > 20000:
+            raise ValueError("Answer must be non-blank text of at most 20000 characters")
+        with self._transaction(immediate=True) as connection:
+            question = self.get_user_question(run_id, question_id)
+            # A lost HTTP response may be retried with the same answer.
+            if question["status"] == "answered" and question["answer"] == answer:
+                return question
+            run = self._require_run(run_id)
+            if question["status"] != "pending" or run.status != "running" or run.cancel_requested_at:
+                raise StorageConflictError("Question is no longer waiting for an answer")
+            connection.execute(
+                "UPDATE user_questions SET answer = ?, status = 'answered', resolved_at = ? WHERE id = ?",
+                (answer, utc_now_iso(), question_id),
+            )
+        return self.get_user_question(run_id, question_id)
+
+    def cancel_user_question(self, run_id: str, question_id: str) -> None:
+        with self._transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE user_questions SET status = 'cancelled', resolved_at = ? WHERE id = ? AND run_id = ? AND status = 'pending'",
+                (utc_now_iso(), question_id, run_id),
+            )
+
     def start_run(self, run_id: str) -> RunRecord:
         return self.update_run_status(run_id, "running")
 
@@ -7904,9 +8031,21 @@ class SQLiteRepository:
         *,
         after_seq: int = 0,
         limit: int | None = None,
+        activity_only: bool = False,
     ) -> list[RunEvent]:
         parameters: list[Any] = [run_id, max(0, int(after_seq))]
         limit_clause = ""
+        activity_clause = ""
+        if activity_only:
+            types = (
+                "model.started", "model.completed", "model.failed",
+                "tool.requested", "tool.started", "tool.completed", "tool.failed",
+                "tool.blocked", "tool.cancelled", "tool.interrupted",
+                "subagent.started", "subagent.completed", "subagent.failed",
+                "recovery.retrying", "recovery.completed", "recovery.failed", "context.compacted",
+            )
+            activity_clause = "AND type IN (" + ",".join("?" for _ in types) + ")"
+            parameters.extend(types)
         if limit is not None:
             limit_clause = "LIMIT ?"
             parameters.append(_positive_limit(limit))
@@ -7916,6 +8055,7 @@ class SQLiteRepository:
                 f"""
                 SELECT * FROM events
                 WHERE run_id = ? AND seq > ?
+                {activity_clause}
                 ORDER BY seq
                 {limit_clause}
                 """,
@@ -8537,6 +8677,20 @@ class SQLiteRepository:
             ).fetchone()
         return _row_to_checkpoint(row) if row else None
 
+    def get_uncheckpointed_tool_run(self, conversation_id: str, *, exclude_run_id: str) -> RunRecord | None:
+        """Do not silently resume an older checkpoint after losing an executed run."""
+        with self._lock:
+            self._ensure_open()
+            row = self._connection.execute(
+                """SELECT r.* FROM runs r
+                   WHERE r.conversation_id = ? AND r.id != ?
+                     AND json_extract(r.metadata_json, '$.tool_checkpoint_required') = 1
+                     AND NOT EXISTS (SELECT 1 FROM checkpoints c WHERE c.run_id = r.id)
+                   ORDER BY r.created_at DESC LIMIT 1""",
+                (conversation_id, exclude_run_id),
+            ).fetchone()
+        return _row_to_run(row) if row else None
+
     def list_checkpoints(
         self, conversation_id: str, *, limit: int = 100
     ) -> list[CheckpointRecord]:
@@ -8693,7 +8847,7 @@ def _normalize_write_scopes(scopes: Sequence[str]) -> list[str]:
 
 def _normalize_risk_level(value: str) -> str:
     normalized = str(value).strip().lower().replace("-", "_")
-    aliases = {"medium_high": "high", "medium-low": "medium"}
+    aliases = {"medium_high": "high"}
     normalized = aliases.get(normalized, normalized)
     if normalized not in {"low", "medium", "high"}:
         raise ValueError(f"Unsupported risk level: {value}")

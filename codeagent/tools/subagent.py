@@ -19,10 +19,8 @@ class SubagentTool:
         default=ToolDefinition(
             name=SUBAGENT_TOOL_NAME,
             description=(
-                "Delegate one independent, bounded coding work unit that needs "
-                "multiple tool calls. Suitable for focused investigation, "
-                "implementation, bug fixing, refactoring, or validation. The "
-                "subagent has fresh context and returns only its final report."
+                "委派一个独立、边界明确且需要多次工具调用的编程工作单元。"
+                "可用于聚焦调查、实现、修复、重构或验证。子助手使用独立上下文，只返回最终报告。"
             ),
             input_schema={
                 "type": "object",
@@ -30,10 +28,8 @@ class SubagentTool:
                     "description": {
                         "type": "string",
                         "description": (
-                            "Self-contained assignment stating the action, goal, "
-                            "exact scope, constraints, completion conditions, and "
-                            "validation. Explicitly request code changes when the "
-                            "subagent should edit files."
+                            "自包含的任务说明：动作、目标、准确范围、约束、完成条件和验证方法。"
+                            "允许修改文件时需明确说明。"
                         ),
                     }
                 },

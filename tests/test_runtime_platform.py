@@ -9,6 +9,7 @@ from unittest.mock import patch
 from codeagent.prompts import PromptMode, PromptRuntime
 from codeagent.runtime_platform import RuntimePlatform, detect_runtime_platform
 from codeagent.tools import BashTool
+from test_bash_process_guard import FakeProcess
 
 
 class RuntimePlatformTests(unittest.TestCase):
@@ -50,11 +51,9 @@ class RuntimePlatformTests(unittest.TestCase):
             shell_arguments=("--command",),
             command_style="Use test syntax.",
         )
-        completed = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="ok\n", stderr=""
-        )
+        completed = FakeProcess()
 
-        with patch("codeagent.tools.bash.subprocess.run", return_value=completed) as run:
+        with patch("codeagent.tools.bash.subprocess.Popen", side_effect=completed.start) as run:
             tool = BashTool(runtime_platform=detected)
             result = tool.run("show-version")
 
@@ -64,17 +63,16 @@ class RuntimePlatformTests(unittest.TestCase):
         run.assert_called_once_with(
             ["test-shell", "--command", "show-version"],
             shell=False,
-            capture_output=True,
+            stdout=run.call_args.kwargs["stdout"],
+            stderr=run.call_args.kwargs["stderr"],
             text=True,
-            timeout=120,
             cwd=str(Path.cwd().resolve()),
             env=run.call_args.kwargs["env"],
+            **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}),
         )
 
     def test_bash_tool_disables_tracing_in_child_processes_by_default(self) -> None:
-        completed = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="ok\n", stderr=""
-        )
+        completed = FakeProcess()
         with patch.dict(
             os.environ,
             {
@@ -84,7 +82,7 @@ class RuntimePlatformTests(unittest.TestCase):
             clear=True,
         ):
             with patch(
-                "codeagent.tools.bash.subprocess.run", return_value=completed
+                "codeagent.tools.bash.subprocess.Popen", side_effect=completed.start
             ) as run:
                 BashTool().run("show-version")
 
@@ -95,9 +93,7 @@ class RuntimePlatformTests(unittest.TestCase):
             self.assertEqual(os.environ["LANGCHAIN_TRACING_V2"], "true")
 
     def test_bash_tool_can_explicitly_propagate_tracing(self) -> None:
-        completed = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="ok\n", stderr=""
-        )
+        completed = FakeProcess()
         with patch.dict(
             os.environ,
             {
@@ -108,7 +104,7 @@ class RuntimePlatformTests(unittest.TestCase):
             clear=True,
         ):
             with patch(
-                "codeagent.tools.bash.subprocess.run", return_value=completed
+                "codeagent.tools.bash.subprocess.Popen", side_effect=completed.start
             ) as run:
                 BashTool().run("show-version")
 
@@ -132,8 +128,8 @@ class RuntimePlatformTests(unittest.TestCase):
         )
         system_prompt = result.system_prompt
 
-        self.assertIn("Current operating system: Windows", system_prompt)
-        self.assertIn("Command shell: PowerShell", system_prompt)
+        self.assertIn("当前操作系统：Windows", system_prompt)
+        self.assertIn("命令 Shell：PowerShell", system_prompt)
         self.assertIn("not POSIX syntax", system_prompt)
 
 

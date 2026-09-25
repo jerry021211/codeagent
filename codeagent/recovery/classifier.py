@@ -11,6 +11,12 @@ from codeagent.recovery.models import RecoveryReason
 def classify_exception(exc: Exception) -> RecoveryReason:
     """Return a normalized recovery reason for common API failures."""
 
+    from codeagent.context.budget import RequestBudgetError
+    if isinstance(exc, RequestBudgetError):
+        # Local preparation has already exhausted its bounded compaction work.
+        # Retrying it here would silently reset that bound and spend more calls.
+        return RecoveryReason.NON_RETRYABLE_ERROR
+
     status = _status_code(exc)
     text = f"{type(exc).__name__}: {exc}".casefold()
 

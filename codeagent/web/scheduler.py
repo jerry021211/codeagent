@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -19,6 +21,7 @@ from codeagent.prompts import PromptMode
 from codeagent.runtime import CancellationToken, CancelledError
 from codeagent.runtime.activity import ExecutionActivity
 from codeagent.runtime.cancellation import ModelCallTimeout
+from codeagent.runtime.execution import is_execution_failure
 from codeagent.teams import (
     AgentSessionRunner,
     AgentSessionState,
@@ -31,7 +34,10 @@ from codeagent.web.storage import (
     ACTIVE_RUN_STATUSES,
     RecordNotFoundError,
     SQLiteRepository,
+    StorageConflictError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AgentFactory(Protocol):
@@ -55,13 +61,14 @@ class _RunJob:
     workspace: str
     prompt: str
     use_team: bool
+    mode: str
     emitter: EventEmitter
     cancellation: CancellationToken
     broker: WaitingPermissionBroker
 
 
 class RunScheduler:
-    """Execute one root task at a time and keep all state transitions durable."""
+    """Run independent conversations in a bounded pool of FIFO workers."""
 
     def __init__(
         self,
@@ -69,10 +76,14 @@ class RunScheduler:
         agent_factory: AgentFactory,
         *,
         approval_timeout: float | None = 600.0,
+        max_concurrent_runs: int = 4,
     ) -> None:
+        if type(max_concurrent_runs) is not int or max_concurrent_runs < 1:
+            raise ValueError("max_concurrent_runs must be a positive integer")
         self.repository = repository
         self.agent_factory = agent_factory
         self.approval_timeout = approval_timeout
+        self.max_concurrent_runs = max_concurrent_runs
         self._jobs: queue.Queue[_RunJob | None] = queue.Queue()
         self._controls: dict[str, _RunJob] = {}
         self._team_approval_brokers: dict[str, WaitingPermissionBroker] = {}
@@ -80,55 +91,67 @@ class RunScheduler:
         self._lead_locks: dict[str, threading.Lock] = {}
         self._lead_activities: dict[str, ExecutionActivity] = {}
         self._lock = threading.RLock()
-        self._thread: threading.Thread | None = None
+        self._threads: list[threading.Thread] = []
         self._stopping = threading.Event()
+        self._stop_lock = threading.Lock()
+        self._closed = False
 
     def start(self) -> None:
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
+            if self._stopping.is_set():
+                raise StorageConflictError("Web runtime is shutting down")
+            if self._threads:
                 return
-            self._stopping.clear()
-            self._thread = threading.Thread(
-                target=self._worker,
-                name="codeagent-run-scheduler",
-                daemon=True,
-            )
-            self._thread.start()
+            for index in range(self.max_concurrent_runs):
+                thread = threading.Thread(
+                    target=self._worker,
+                    name=f"codeagent-run-{index + 1}",
+                    daemon=True,
+                )
+                self._threads.append(thread)
+                thread.start()
 
     def stop(self, timeout: float | None = None) -> None:
-        self._stopping.set()
-        with self._lock:
-            for job in self._controls.values():
-                job.cancellation.cancel("Web runtime is shutting down")
-        self._jobs.put(None)
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout=None if timeout is None else max(0.0, timeout))
-        with self._lock:
-            remaining = list(self._controls.values())
-        for job in remaining:
-            current = self.repository.get_run(job.run_id)
-            if current is not None and current.status in ACTIVE_RUN_STATUSES:
-                try:
-                    self.repository.update_run_status(
-                        job.run_id,
-                        "interrupted",
-                        error={"message": "Web runtime stopped before execution completed"},
-                    )
-                    job.emitter.emit(
-                        "run.interrupted",
-                        {"status": "interrupted", "reason": "runtime shutdown"},
-                    )
-                except Exception:
-                    pass
-            self._release(job.run_id)
-        close_factory = getattr(self.agent_factory, "close", None)
-        if callable(close_factory):
-            close_factory()
+        with self._stop_lock:
+            if self._closed:
+                return
+            with self._lock:
+                if not self._stopping.is_set():
+                    self._stopping.set()
+                    for job in self._controls.values():
+                        job.cancellation.cancel("Web runtime is shutting down")
+                    for _ in self._threads:
+                        self._jobs.put(None)
+            deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+            for thread in self._threads:
+                thread.join(timeout=None if deadline is None else max(0.0, deadline - time.monotonic()))
+            if any(thread.is_alive() for thread in self._threads):
+                # Workers still own the factory and repository. A later stop may retry.
+                raise TimeoutError("Run workers have not stopped; runtime resources remain open")
+            close_factory = getattr(self.agent_factory, "close", None)
+            if callable(close_factory):
+                close_factory()
+            self._closed = True
 
     def submit(
-        self, conversation_id: str, content: str, *, use_team: bool = False
+        self, conversation_id: str, content: str, *, use_team: bool = False,
+        mode: str = "normal",
     ) -> RunRecord:
+        # Admission, queue order and shutdown share one short critical section.
+        with self._lock:
+            self.start()
+            return self._submit(conversation_id, content, use_team=use_team, mode=mode)
+
+    def _submit(
+        self, conversation_id: str, content: str, *, use_team: bool,
+        mode: str,
+    ) -> RunRecord:
+        if mode not in {"normal", "discuss"}:
+            raise ValueError("Unknown execution mode")
+        if mode == "discuss" and (
+            use_team or self.repository.get_active_team_run_for_conversation(conversation_id)
+        ):
+            raise ValueError("Discuss mode cannot start or control a Team")
         prompt = str(content).strip()
         if not prompt:
             raise ValueError("Message content cannot be empty")
@@ -140,7 +163,7 @@ class RunScheduler:
                 conversation_id,
                 title=_conversation_title(prompt),
             )
-        requested_mode = "team" if use_team else "single"
+        requested_mode = "team" if use_team else "discuss" if mode == "discuss" else "single"
         run = self.repository.create_run(
             conversation_id,
             metadata={
@@ -148,7 +171,7 @@ class RunScheduler:
                 "agent_profile": (
                     PromptMode.TEAM_PLANNER.value
                     if use_team
-                    else PromptMode.NORMAL.value
+                    else mode
                 ),
             },
         )
@@ -157,7 +180,7 @@ class RunScheduler:
             role="user",
             content=prompt,
             run_id=run.id,
-            metadata={"status": "complete"},
+            metadata={"status": "complete", "mode": mode},
         )
         emitter = EventEmitter(
             RecordingEventSink(self.repository),
@@ -214,6 +237,7 @@ class RunScheduler:
             workspace=conversation.workspace,
             prompt=prompt,
             use_team=bool(use_team),
+            mode=mode,
             emitter=emitter,
             cancellation=cancellation,
             broker=broker,
@@ -222,13 +246,9 @@ class RunScheduler:
             self._controls[run.id] = job
         emitter.emit("run.queued", {"status": "queued", "queue_position": run.queue_position})
         self._jobs.put(job)
-        self.start()
         return self.repository.get_run(run.id) or run
 
     def reload_mcp(self, workspace: str) -> bool:
-        with self._lock:
-            if any(job.workspace == workspace for job in self._controls.values()):
-                return False
         reload_factory = getattr(self.agent_factory, "reload_mcp", None)
         if not callable(reload_factory):
             return False
@@ -241,14 +261,23 @@ class RunScheduler:
         self._team_worktrees = worktree_manager
 
     def cancel(self, run_id: str) -> RunRecord:
-        run = self.repository.request_run_cancel(run_id)
         with self._lock:
+            run = self.repository.request_run_cancel(run_id)
             job = self._controls.get(run_id)
-        if job is not None:
-            job.cancellation.cancel("Cancelled by user")
-            event_type = "run.cancelled" if run.status == "cancelled" else "run.cancelling"
-            job.emitter.emit(event_type, {"status": run.status})
+            if job is not None and run.status in {*ACTIVE_RUN_STATUSES, "cancelled"}:
+                job.cancellation.cancel("Cancelled by user")
+                event_type = "run.cancelled" if run.status == "cancelled" else "run.cancelling"
+                job.emitter.emit(event_type, {"status": run.status})
+                if run.status == "cancelled":
+                    # The queue retains a harmless tombstone; replay need not wait
+                    # for busy workers to dequeue an already cancelled Run.
+                    self._release(run_id)
         return self.repository.get_run(run_id) or run
+
+    def is_run_pending(self, run_id: str) -> bool:
+        """Include final event persistence, not just the database Run status."""
+        with self._lock:
+            return run_id in self._controls
 
     def resolve_approval(
         self,
@@ -627,9 +656,9 @@ class RunScheduler:
     def _worker(self) -> None:
         while True:
             job = self._jobs.get()
-            if job is None:
-                return
             try:
+                if job is None:
+                    return
                 if self._stopping.is_set():
                     current = self.repository.get_run(job.run_id)
                     if current is not None and current.status == "queued":
@@ -642,30 +671,47 @@ class RunScheduler:
                             "run.interrupted",
                             {"status": "interrupted", "reason": "runtime shutdown"},
                         )
-                    self._release(job.run_id)
                 else:
                     self._execute(job)
+            except Exception as exc:
+                # A failed checkpoint/event write must not permanently lose a worker.
+                logger.exception("Run worker failed for %s", job.run_id if job else None)
+                if job is not None:
+                    try:
+                        current = self.repository.get_run(job.run_id)
+                        if current is not None and current.status in ACTIVE_RUN_STATUSES:
+                            error = {"type": type(exc).__name__, "message": str(exc)}
+                            self.repository.update_run_status(job.run_id, "failed", error=error)
+                            job.emitter.emit("run.failed", {"status": "failed", "error": error})
+                    except Exception:
+                        logger.exception("Could not persist failed Run %s", job.run_id)
             finally:
+                if job is not None:
+                    self._release(job.run_id)
                 self._jobs.task_done()
 
     def _execute(self, job: _RunJob) -> None:
-        current = self.repository.get_run(job.run_id)
-        if current is None:
-            return
-        if current.status == "cancelled" or job.cancellation.is_cancelled:
-            self._release(job.run_id)
-            return
-
         agent = None
         try:
-            self.repository.start_run(job.run_id)
-            job.emitter.emit("run.started", {"status": "running"})
+            with self._lock:
+                current = self.repository.get_run(job.run_id)
+                if current is None or current.status not in ACTIVE_RUN_STATUSES:
+                    return
+                job.cancellation.raise_if_cancelled()
+                self.repository.start_run(job.run_id)
+                job.emitter.emit("run.started", {"status": "running"})
             active_team = self.repository.get_active_team_run_for_conversation(
                 job.conversation_id
             )
             if active_team is not None:
+                if job.mode == "discuss":
+                    raise ValueError("A Team became active after this discussion was queued")
                 self._execute_team_lead(job, active_team)
                 return
+            if not job.use_team:
+                missing = self.repository.get_uncheckpointed_tool_run(job.conversation_id, exclude_run_id=job.run_id)
+                if missing is not None:
+                    raise RuntimeError(f"上次运行 {missing.id} 未能保存完整上下文，已暂停继续执行，以免重复产生副作用。请先恢复该运行的检查点，或核实实际状态后新建会话。")
             checkpoint = self.repository.get_latest_checkpoint(job.conversation_id)
             factory_method = getattr(self.agent_factory, "for_workspace", None)
             workspace_factory = (
@@ -676,13 +722,13 @@ class RunScheduler:
             profile = (
                 PromptMode.TEAM_PLANNER
                 if job.use_team
-                else PromptMode.NORMAL
+                else PromptMode(job.mode)
             )
             job.emitter.emit(
                 "agent.profile.selected",
                 {
                     "profile": profile.value,
-                    "requested_mode": "team" if job.use_team else "single",
+                    "requested_mode": "team" if job.use_team else "discuss" if job.mode == "discuss" else "single",
                 },
             )
             create_kwargs = {
@@ -691,13 +737,21 @@ class RunScheduler:
                 "permission_broker": job.broker,
                 "checkpoint": checkpoint,
             }
-            if job.use_team:
+            if job.use_team or job.mode == "discuss":
                 create_kwargs["root_prompt_mode"] = profile
             agent = workspace_factory.create(**create_kwargs)
+            if not job.use_team:
+                with self._lock:
+                    job.cancellation.raise_if_cancelled()
+                    current = self.repository.get_run(job.run_id) or current
+                    current = self.repository.update_run_status(
+                        job.run_id, current.status,
+                        metadata={**current.metadata, "tool_checkpoint_required": True},
+                    )
             result = agent.run(job.prompt)
             job.cancellation.raise_if_cancelled()
             terminal_status = (
-                "failed" if result.stop_reason.startswith(("recovery_failed", "max_iterations"))
+                "failed" if is_execution_failure(result.stop_reason)
                 else "completed"
             )
             active_team = self.repository.get_active_team_run_for_conversation(
@@ -762,7 +816,10 @@ class RunScheduler:
             )
         except ModelCallTimeout as exc:
             error = {"type": exc.reason_code, "message": exc.reason}
-            self.repository.update_run_status(job.run_id, "failed", error=error)
+            if agent is not None:
+                self._finish(job, agent, "failed", error=error)
+            else:
+                self.repository.update_run_status(job.run_id, "failed", error=error)
             job.emitter.emit("run.failed", {"status": "failed", "error": error})
         except CancelledError as exc:
             latest = self.repository.get_run(job.run_id)
@@ -779,8 +836,6 @@ class RunScheduler:
             else:
                 self.repository.update_run_status(job.run_id, "failed", error=error)
             job.emitter.emit("run.failed", {"status": "failed", "error": error})
-        finally:
-            self._release(job.run_id)
 
     def _finish(
         self,
@@ -791,6 +846,18 @@ class RunScheduler:
         error: Any | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        from codeagent.messages import validate_tool_history
+
+        validate_tool_history(agent.messages)
+        checkpoint_metadata = {
+            "tool_history_version": 1,
+            "todo_revision": (
+                agent.context.todo_store.revision if agent.context.todo_store else 0
+            ),
+        }
+        export_state = getattr(agent, "export_execution_state", None)
+        if not job.use_team and callable(export_state):
+            checkpoint_metadata["execution_guard"] = export_state()
         self.repository.finish_run_with_checkpoint(
             job.run_id,
             status=status,
@@ -799,11 +866,7 @@ class RunScheduler:
             context=serialize_runtime_state(agent.context.state),
             error=error,
             metadata=metadata,
-            checkpoint_metadata={
-                "todo_revision": (
-                    agent.context.todo_store.revision if agent.context.todo_store else 0
-                )
-            },
+            checkpoint_metadata=checkpoint_metadata,
         )
 
     def _release(self, run_id: str) -> None:

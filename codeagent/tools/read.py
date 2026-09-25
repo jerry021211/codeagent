@@ -16,23 +16,22 @@ class ReadFileTool:
     definition: ToolDefinition = ToolDefinition(
         name="read_file",
         description=(
-            "Read a file's contents with line numbers. "
-            "Always read a file before editing it."
+            "读取文件并返回行号；修改前读取相关上下文。用 offset/limit 限定行段，截断时按需继续读取。"
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "Path to the file",
+                    "description": "文件路径",
                 },
                 "offset": {
                     "type": "integer",
-                    "description": "Start line (1-based). Default 1.",
+                    "description": "起始行号，从 1 开始；默认 1。",
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max lines to read. Default 2000.",
+                    "description": "最多读取行数，默认 2000。",
                 },
             },
             "required": ["file_path"],

@@ -1,1 +1,1 @@
-Use `remember` only for stable facts that should help future turns. Do not store secrets, temporary task status, or large code blocks.
+仅用 `remember` 保存有依据、稳定且对未来任务有用的信息。不要把未经确认的假设、一次失败或临时绕行办法写成长期规则；不保存密钥、临时进度、大段源码或日志。

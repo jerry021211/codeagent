@@ -19,23 +19,22 @@ class GrepTool:
     definition: ToolDefinition = ToolDefinition(
         name="grep",
         description=(
-            "Search file contents with regex. "
-            "Returns matching lines with file path and line number."
+            "按正则搜索文件内容，返回路径、行号和匹配行。已知相关区域时用 path/include 缩小范围；结论和修改需读取周边代码。零匹配只表示本次范围未命中。"
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern to search for",
+                    "description": "搜索正则表达式",
                 },
                 "path": {
                     "type": "string",
-                    "description": "File or directory to search (default: cwd)",
+                    "description": "搜索文件或目录，默认当前目录",
                 },
                 "include": {
                     "type": "string",
-                    "description": "Only search files matching this glob (e.g. '*.py')",
+                    "description": "只搜索匹配该 glob 的文件，例如 *.py",
                 },
             },
             "required": ["pattern"],

@@ -90,6 +90,34 @@ class TeamPersistenceTests(unittest.TestCase):
         )
         return agent, session
 
+    def test_delete_terminal_team_conversation_cleans_restrict_children(self) -> None:
+        self._approve_plan()
+        task = self.repository.create_task(
+            self.task_list_id, subject="Analyze", description="Analyze",
+            metadata={"kind": "analysis"},
+        )
+        agent, session = self._create_teammate("delete")
+        attempt = self.repository.claim_task_attempt(
+            self.team.id, task_id=task.task.id, agent_id=agent.id,
+            session_id=session.id, expected_task_revision=task.revision,
+            command_id="claim-delete",
+        )
+        self.repository.cancel_team_run(
+            self.team.id, cancelled_by="user", reason="done", command_id="cancel-delete",
+        )
+        self.repository.update_run_status(self.run.id, "cancelled")
+        with self.assertRaisesRegex(StorageConflictError, "子任务退出"):
+            self.repository.delete_conversation(self.conversation.id)
+        self.repository.finalize_cancelled_attempt(attempt.id, reason="worker exited")
+
+        self.assertTrue(self.repository.delete_conversation(self.conversation.id))
+
+        self.assertIsNone(self.repository.get_team_run(self.team.id))
+        self.assertEqual(self.repository.list_task_attempts(self.team.id), [])
+        self.assertIsNone(self.repository.get_task_list(self.task_list_id))
+        self.assertEqual(self.repository._connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+        self.assertEqual(self.repository._connection.execute("SELECT COUNT(*) FROM database_changes").fetchone()[0], 0)
+
     def test_analysis_write_scope_rejected_at_submit_approve_and_claim(self) -> None:
         task = self.repository.create_task(
             self.task_list_id, subject="Document", description="Write a document",

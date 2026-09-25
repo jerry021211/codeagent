@@ -150,7 +150,7 @@ class RecoveryRuntimeTests(unittest.TestCase):
         self.assertTrue(second.retry)
         self.assertEqual(state.continuation_count, 1)
         self.assertEqual(messages[-2]["role"], "assistant")
-        self.assertIn("Output token limit hit", messages[-1]["content"])
+        self.assertIn("已达到本次输出上限", messages[-1]["content"])
 
 
 if __name__ == "__main__":

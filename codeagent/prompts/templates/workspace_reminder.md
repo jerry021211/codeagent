@@ -1,1 +1,1 @@
-Current workspace: {workspace}
+当前工作区：{workspace}

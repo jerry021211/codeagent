@@ -31,6 +31,14 @@ class MemoryStore:
         self.access_policy = access_policy
 
     @contextmanager
+    def reading(self) -> Iterator[None]:
+        if self.access_policy is None:
+            yield
+            return
+        with self.access_policy.reading():
+            yield
+
+    @contextmanager
     def writing(self) -> Iterator[None]:
         if self.access_policy is None:
             yield
@@ -39,6 +47,10 @@ class MemoryStore:
             yield
 
     def list_memories(self) -> list[MemoryRecord]:
+        with self.reading():
+            return self._list_memories()
+
+    def _list_memories(self) -> list[MemoryRecord]:
         if not self.root.exists():
             return []
         records: list[MemoryRecord] = []
@@ -89,13 +101,18 @@ class MemoryStore:
             return record
 
     def load(self, name: str) -> MemoryRecord:
-        slug = self._slug(self._clean_required("name", name))
-        record = self._load_by_slug(slug)
-        if record is None:
-            raise KeyError(name)
-        return record
+        with self.reading():
+            slug = self._slug(self._clean_required("name", name))
+            record = self._load_by_slug(slug)
+            if record is None:
+                raise KeyError(name)
+            return record
 
     def load_file(self, filename: str) -> MemoryRecord:
+        with self.reading():
+            return self._load_file(filename)
+
+    def _load_file(self, filename: str) -> MemoryRecord:
         clean = Path(str(filename or "").strip()).name
         if not clean.endswith(".md") or clean == INDEX_FILE_NAME:
             raise KeyError(filename)
@@ -134,7 +151,7 @@ class MemoryStore:
         records = self.list_memories()[:max_items]
         if not records:
             return ""
-        lines = ["Available memories:"]
+        lines = ["可用记忆："]
         for record in records:
             filename = record.filename or self._filename_for_name(record.name)
             lines.append(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Iterable
 from dataclasses import fields, replace
 from pathlib import Path
@@ -27,11 +28,13 @@ from codeagent import (
 from codeagent.context import RuntimeState
 from codeagent.events import EventEmitter, UsageTracker
 from codeagent.mcp import McpRouter
+from codeagent.messages import reconcile_tool_history
 from codeagent.memory import MemoryAccessController, MemoryWriteBlocked
 from codeagent.permissions import PermissionPolicy, WaitingPermissionBroker
 from codeagent.runtime import CancellationToken, RuntimeDataPaths
 from codeagent.runtime.activity import ExecutionActivity
-from codeagent.tools import LoadToolOutputTool, ToolRegistry, WorkspaceGuard
+from codeagent.tools import LoadContextHistoryTool, LoadToolOutputTool, ToolRegistry, WorkspaceGuard
+from codeagent.web.questions import WebUserQuestions
 from codeagent.teams import (
     ActiveTeamRootToolExecutionGate,
     AgentSessionRecord,
@@ -73,7 +76,9 @@ class WebAgentFactory:
                 self.task_service.has_active_team_run_for_workspace(project)
             )
         )
-        self._mcp_routers: dict[tuple[Path, bool], McpRouter] = {}
+        self._mcp_routers: dict[tuple[Path, Path, bool], McpRouter] = {}
+        self._mcp_lock = threading.RLock()
+        self._retired_mcp_routers: list[McpRouter] = []
 
     def create(
         self,
@@ -117,6 +122,13 @@ class WebAgentFactory:
         messages: list[dict[str, Any]] = []
         if checkpoint is not None:
             messages = [dict(item) for item in checkpoint.messages]
+            if team_session is None and not team_planner:
+                messages, repaired = reconcile_tool_history(
+                    messages,
+                    repair_missing=not getattr(checkpoint, "metadata", {}).get("tool_history_version"),
+                )
+                if repaired:
+                    event_emitter.emit("history.repaired", {"tool_use_ids": repaired, "status": "unknown"})
             state = _restore_runtime_state(checkpoint.context)
 
         execution = event_emitter.context
@@ -153,7 +165,7 @@ class WebAgentFactory:
         )
         skill_loader = self._skill_loader()
         memory_store = self._memory_store(
-            always_read_only=team_session is not None or team_planner
+            always_read_only=team_session is not None or team_planner or root_mode is PromptMode.DISCUSS
         )
         recovery = RecoveryRuntime(self.env.recovery_config)
         memory_manager = (
@@ -169,6 +181,10 @@ class WebAgentFactory:
 
         def tools_for():
             registry = create_default_registry(
+                ask_user_fn=(
+                    WebUserQuestions(self.task_service, event_emitter, cancellation).ask
+                    if team_session is None and not team_planner else None
+                ),
                 skill_loader=skill_loader,
                 memory_store=memory_store,
                 allow_memory_write=team_session is None and not team_planner,
@@ -183,6 +199,7 @@ class WebAgentFactory:
                 agent_id=execution.agent_id,
             )
             registry.register(LoadToolOutputTool(context_config.tool_output_dir))
+            registry.register(LoadContextHistoryTool(context_config.transcript_dir))
             self._mcp_router(
                 force_workspace_cwd=team_session is not None
             ).register_tools(registry)
@@ -259,6 +276,9 @@ class WebAgentFactory:
             subagent_tools.register(
                 LoadToolOutputTool(subagent_context_config.tool_output_dir)
             )
+            subagent_tools.register(
+                LoadContextHistoryTool(subagent_context_config.transcript_dir)
+            )
             return (
                 subagent_tools,
                 create_default_hooks(
@@ -271,10 +291,13 @@ class WebAgentFactory:
                 ContextManager(config=subagent_context_config, todo_store=sub_todos),
             )
 
+        agent_config = self.env.to_agent_config(planning_backend=PlanningBackend.TASKS)
+        if team_session is not None or team_planner:
+            agent_config = replace(agent_config, loop_guard=None)
         agent = Agent(
             client=client,
             tools=tools_for(),
-            config=self.env.to_agent_config(planning_backend=PlanningBackend.TASKS),
+            config=agent_config,
             hooks=hooks,
             context=context,
             memory_manager=memory_manager,
@@ -293,6 +316,10 @@ class WebAgentFactory:
             allow_subagents=team_session is None and not team_planner,
             prompt_mode=root_mode if team_session is None else None,
         )
+        if checkpoint is not None and team_session is None and not team_planner:
+            guard_state = getattr(checkpoint, "metadata", {}).get("execution_guard")
+            if guard_state is not None:
+                agent.restore_execution_state(guard_state)
         if team_planner and team_session is None:
             agent.tools = TeamPlannerToolExecutionGate(
                 self.task_service,
@@ -438,6 +465,8 @@ class WebAgentFactory:
             memory_access=self.memory_access,
         )
         factory._mcp_routers = self._mcp_routers
+        factory._mcp_lock = self._mcp_lock
+        factory._retired_mcp_routers = self._retired_mcp_routers
         return factory
 
     def for_team_workspace(
@@ -454,31 +483,38 @@ class WebAgentFactory:
             memory_access=self.memory_access,
         )
         factory._mcp_routers = self._mcp_routers
+        factory._mcp_lock = self._mcp_lock
+        factory._retired_mcp_routers = self._retired_mcp_routers
         return factory
 
     def close(self) -> None:
-        for router in self._mcp_routers.values():
-            router.close()
-        self._mcp_routers.clear()
+        # Called only after root and Team workers have exited.
+        with self._mcp_lock:
+            for router in [*self._mcp_routers.values(), *self._retired_mcp_routers]:
+                router.close()
+            self._mcp_routers.clear()
+            self._retired_mcp_routers.clear()
 
     def reload_mcp(self, workspace: str | Path) -> None:
         config_path = self._mcp_config_path(Path(workspace).resolve())
-        for key in [item for item in self._mcp_routers if item[0] == config_path]:
-            router = self._mcp_routers.pop(key)
-            router.close()
+        with self._mcp_lock:
+            for key in [item for item in self._mcp_routers if item[0] == config_path]:
+                # Existing Agents keep their tools/connections until shutdown.
+                self._retired_mcp_routers.append(self._mcp_routers.pop(key))
 
     def _mcp_router(self, *, force_workspace_cwd: bool = False) -> McpRouter:
         config_path = self._mcp_config_path(self.workspace)
-        key = (config_path, force_workspace_cwd)
-        router = self._mcp_routers.get(key)
-        if router is None:
-            router = McpRouter(
-                config_path,
-                workspace_root=self.workspace if force_workspace_cwd else None,
-                force_workspace_cwd=force_workspace_cwd,
-            )
-            self._mcp_routers[key] = router
-        return router
+        key = (config_path, self.workspace, force_workspace_cwd)
+        with self._mcp_lock:
+            router = self._mcp_routers.get(key)
+            if router is None:
+                router = McpRouter(
+                    config_path,
+                    workspace_root=self.workspace if force_workspace_cwd else None,
+                    force_workspace_cwd=force_workspace_cwd,
+                )
+                self._mcp_routers[key] = router
+            return router
 
     def _mcp_config_path(self, workspace: Path) -> Path:
         configured = self.env.mcp_config_path
@@ -488,9 +524,7 @@ class WebAgentFactory:
         if not self.env.enable_skills:
             return None
         roots = [
-            self.workspace_guard.ensure_within(root)
-            if root.is_absolute()
-            else self.workspace_guard.resolve(root)
+            self.data_paths.skill_root(root)
             for root in self.env.skill_roots
         ]
         return SkillLoader(roots=roots)
@@ -535,15 +569,9 @@ class WebAgentFactory:
 def _read_only_registry(
     registry: ToolRegistry, read_only_mcp_tools: Iterable[str]
 ) -> ToolRegistry:
-    allowed_mcp = {str(name) for name in read_only_mcp_tools}
-    blocked = {"write_file", "edit_file"}
-    blocked.update(
-        str(schema["name"])
-        for schema in registry.schemas()
-        if str(schema["name"]).startswith("mcp__")
-        and str(schema["name"]) not in allowed_mcp
+    return _team_mcp_registry(registry, read_only_mcp_tools).copy_without(
+        {"write_file", "edit_file"}
     )
-    return registry.copy_without(blocked)
 
 
 def _team_mcp_registry(

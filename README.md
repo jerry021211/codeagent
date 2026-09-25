@@ -25,17 +25,18 @@ codeagent/
   skills/           # skill catalog 与按需加载
   memory/           # Markdown 长期记忆与模型选择
   tasks/            # 持久化 Task 领域模型
-  runtime/          # 后台任务/运行时占位
-  teams/            # 多 agent 通讯占位
-  worktrees/        # worktree 隔离占位
+  runtime/          # 取消、活动监测、运行数据目录与 Team Supervisor
+  teams/            # 团队规划、消息、Session、候选交付与执行权限
+  worktrees/        # Git worktree 隔离、候选快照与现场校验
   mcp/              # 外部 MCP Server 配置、连接与工具适配
   recovery/         # 分类、退避、fallback 与续写恢复
   events/           # 结构化运行事件与 Token 计量
   web/              # SQLite、FIFO 调度器与 FastAPI/SSE transport
 ```
 
-说明：仓库中的 Web 运行时和 MCP 工具接入已是实际实现；`teams/`、`worktrees/` 和旧的
-`runtime/background.py` 仍是后续扩展点，不参与当前页面执行链路。
+说明：Web 运行时、MCP、Team 和 Worktree 均已有实际实现。显式启用 Team 后，
+`runtime/background.py` 中的 `TeamSupervisor` 负责调度团队执行，`teams/` 负责团队协作，
+`worktrees/` 为代码任务提供独立工作区。
 
 ## Web 工作台
 
@@ -68,7 +69,11 @@ Web 运行时有以下边界：
 
 - `--workspace` 是数据存储位置和新对话的默认目录，不再是唯一可打开的项目。
 - 所有文件和搜索工具限制在当前对话绑定的工作区内，并防止符号链接逃逸。
-- 根任务使用 FIFO 串行队列；不同工作区不共享可变的 Agent/Tool/CWD 状态。
+- 根任务使用 FIFO 队列，默认最多 4 个会话并行；同一会话只能有一个排队或运行中的
+  任务。`CODEAGENT_WEB_MAX_CONCURRENT_RUNS` 可设置正整数并发上限，设为 `1` 恢复
+  串行执行。此上限不包含 Team 内部 worker；不同 Run 不共享可变的 Agent/Tool/CWD 状态。
+- 等待回答、审批或模型重试仍占一个并发名额。多个会话可操作同一项目目录，但项目文件
+  仍然共享，涉及重叠修改时应使用独立工作区/worktree。
 - 工作区浏览 API 只列出本机目录名，不读取文件内容，并拒绝 UNC/网络路径。
 - 危险操作通过页面审批；取消在模型调用、工具调用和退避等待之间的安全边界生效。
 - SSE 事件带持久化序号，断线后可以继续回放；未完成 Run 在进程重启后标记为
@@ -119,6 +124,71 @@ CLI 默认启用基础 hooks：
 - `PreToolUse`：权限检查和工具调用日志
 - `PostToolUse`：大输出提醒
 - `Stop`：工具调用次数统计
+
+普通 Agent、Discuss 和普通子 Agent 默认启用防循环与任务预算，Team 不在本次范围内。
+保护状态独立于上下文压缩；Web checkpoint 保存状态，循环或预算停止会标记为失败，
+CLI 单次执行返回非零退出码。规则、可调阈值、恢复语义和输入识别限制见
+[防循环与执行预算](docs/loop-guard.md)。
+
+## Discuss：只读讨论模式
+
+用于代码阅读、审查和架构讨论，不要求先建计划。通过 `PreToolUse` hook 强制限制
+工具执行；即使模型要求写入，也会返回 `tool.blocked`，不会进入审批或执行写工具。
+
+- **Web**：点击输入框下方的模式按钮，在向上展开的菜单中选择 `Code · 编码` 或 `Discuss · 只读`；也可输入
+  `/discuss` 切换。运行和排队期间不可切换，停止或完成后可切回编码。
+  每条消息的模式随 Run 保存；重新打开会话时按最近一条用户消息恢复选择。
+  切换模式后的下一条请求会在模型历史尾部追加运行时模式更新，明确旧回复中的模式
+  已经过时；原有对话保持完整。旧版会话首次恢复时同样补充当前模式，之后同模式不重复追加。
+- **CLI**：`python -m codeagent --discuss "解释这个项目的架构"`；交互模式支持
+  `/discuss`、`/discuss on`、`/discuss off`，提示符显示 `[discuss] >`。
+- **SDK**：构造 `Agent(..., prompt_mode=PromptMode.DISCUSS)`，或在普通 Agent
+  空闲时调用 `agent.set_discuss_mode(True/False)`。
+- **API**：`POST /api/conversations/{id}/runs` 的 JSON 支持
+  `{"content":"解释架构","mode":"discuss"}`；省略 `mode` 时仍为 `normal`。
+
+可使用读取、搜索、技能/记忆加载、`TaskGet`、`TaskList` 和上下文压缩。
+文件写入、编辑、记忆保存、任务/TODO 更新、子 Agent、Team 和所有外部 MCP 工具
+均被阻止，回合后的自动记忆维护也暂停。退出后继续遵守原来的权限策略。
+
+Shell 只接收单条字面量命令和明确允许的选项，例如 `Get-Content -Raw README.md`、
+`Get-ChildItem -Name`、`rg -n pattern codeagent`、`git status --short`。
+`git diff/log/show` 必须加 `--no-ext-diff --no-textconv`，防止执行外部差异转换器。
+复合命令、管道、重定向、脚本、网络命令和未知工具默认拒绝；复杂搜索优先使用原生工具。
+
+这是 Agent 工具执行策略，不是操作系统沙箱；仍假定本机命令程序及配置可信。
+会话、事件、checkpoint 和工具输出仍按原机制持久化到 Runtime 数据目录。
+Web 的模式是每次请求的快照，不会终止其他会话或已存在的后台程序。
+
+源码研究、原项目 hook 调用链、命令策略局限和本项目接入设计见
+[Discuss 模式实现说明](docs/discuss-mode.md)。
+
+## 用户提问：ask_user
+
+CLI 和 Web 的主 Agent 可在需求、偏好或关键决策不明确时调用：
+
+```json
+{"question": "导出文件需要哪种格式？", "options": ["CSV", "JSON"]}
+```
+
+`options` 可省略，用户始终可以自由回答。调用会阻塞当前 Agent，直到收到非空回答；
+等待没有自动超时，不会替用户选择答案或继续模型循环。当前 Run 占用一个并发名额，
+其他名额可以继续执行其他会话；所有名额都在等待时，新任务排队。HTTP 服务仍可处理
+回答和取消请求。多会话调度设计与验证见 [多会话并发说明](docs/concurrent-sessions.md)。
+
+- CLI 在终端显示问题，接受选项编号或自由文本；空输入继续等待，Ctrl+C 中止。
+- Web 在聊天输入区上方显示问题和回答框，点击选项后仍需提交；可用“停止”取消等待。
+  问题和回答保存在 SQLite，刷新页面可恢复；服务重启会中断 Run 并取消未回答问题。
+- Discuss 模式也可提问；Team 和独立子 Agent 工具池不新增交互入口。
+- 回答作为本次 `ask_user` 的工具结果交回模型，随后继续同一个 Run。
+
+SDK 通过 `create_default_registry(ask_user_fn=handler)` 注入同步回调，签名为
+`handler(question: str, options: list[str]) -> str`；未注入时不暴露提问工具。
+终端处理器可从 `codeagent.tools` 导入 `terminal_ask_user`。
+
+Web 接口：`GET /api/runs/{run_id}/questions` 查看问题，
+`POST /api/runs/{run_id}/questions/{question_id}/answer` 提交 `{"answer":"JSON"}`。
+空回答返回 422；重复提交相同回答幂等，冲突回答或已取消问题返回 409。
 
 ## 规划能力：todo_write
 
@@ -330,7 +400,9 @@ RECOVERY_SIDE_QUERY_MAX_RETRIES=2
 
 默认启用两级 Skill Loading：
 
-- 启动时扫描 `SKILLS_DIR` 指定的目录，默认是项目根目录 `.skills`。
+- 所有项目、工作区及 Team Worktree 共用同一份全局技能库，不扫描项目内的 `.skills`。
+- 启动时扫描 `SKILLS_DIR` 指定的目录，默认是 `CODEAGENT_DATA_DIR/skills`。
+- 相对路径统一相对于 CodeAgent 数据目录解析；也支持指定全局技能库的绝对路径。
 - 每个 skill 放在独立目录中，并提供 `SKILL.md`。
 - Agent 的 system prompt 只注入 skill catalog：名称、描述和适用场景。
 - 完整 `SKILL.md` 不会常驻 system prompt；模型需要时调用 `load_skill(name)` 按需加载。
@@ -339,7 +411,7 @@ RECOVERY_SIDE_QUERY_MAX_RETRIES=2
 示例目录：
 
 ```text
-.skills/
+<CODEAGENT_DATA_DIR>/skills/
   code-review/
     SKILL.md
   python-refactor/
@@ -362,7 +434,7 @@ when_to_use: Use for Python refactors, type hints, docstrings, main guards, API 
 ...
 ```
 
-当前项目默认提供三个项目级 skill：
+全局技能库可存放以下 skill：
 
 - `code-review`：代码审查、风险、测试缺口。
 - `python-refactor`：Python 重构、类型标注、docstring、main guard。
@@ -372,8 +444,13 @@ when_to_use: Use for Python refactors, type hints, docstrings, main guards, API 
 
 ```bash
 ENABLE_SKILLS=true
-SKILLS_DIR=.skills
+SKILLS_DIR=skills
 ```
+
+Windows 默认技能目录为 `%LOCALAPPDATA%\CodeAgent\data\skills`。
+CLI 和 Web 使用相同的加载规则，切换项目不会切换技能目录。
+升级旧配置时，将 `SKILLS_DIR=.skills` 改为 `SKILLS_DIR=skills`，并把原有技能目录
+复制到全局技能库；程序不会自动导入新打开项目中的技能。
 
 ## 长期记忆：Memory
 
@@ -452,29 +529,46 @@ python -m codeagent --no-stream "按照我之前记录过的项目讲解偏好�
 
 ## 上下文压缩：Context Compact
 
-默认启用 `CONTEXT_COMPACT_MODE=model`。同一代历史只允许在尾部追加，旧消息
-不会因为工具结果变旧而再次改写，因此更利于模型的前缀缓存。
+上下文管理面向普通主 Agent 和同步子 Agent，涵盖 CLI、普通 Web 与 SDK。
+本轮不开发或验收 Team。`Agent.messages` 和 checkpoint 保存已接收历史，
+每次发送给模型时另建视图；摘要和清理不会覆盖原记录。
 
-工具结果会在第一次加入 history 前定型：单个结果超过 80k 时保存完整文件并留下
-路径和预览；同一批结果超过 200k 时从最大的结果开始进一步外置，直到整批回到
-预算内。已发送的工具结果之后不再修改。
+默认规则是“够用就保留，接近上限再整理”：
 
-history 超过 300k 时，专用摘要模型生成结构化 checkpoint，完整旧 history 保存到
-Agent 独立的外部 Context 目录，摘要成为下一代的起点。自动压缩、手动 `compact()` 和上下文过长
-恢复共用这个入口。换代后的第一次调用会冷启动缓存，之后继续追加并重新预热。
+- 完整请求超过 300k 字符，或本次估算输入加输出预留达到已配置窗口的 80%，
+  才尝试清理旧的大工具内容；清理后仍有压力才调用摘要模型。
+- 消息数、执行轮数不再独立触发摘要；上一轮很大也不会让已经缩小的当前请求反复压缩。
+- 摘要只折叠合法的旧区间，保留当前用户原文、近期至少 2 个执行轮；跨回合至少留 12 条消息。
+  候选摘要须让完整请求至少省下 256 字符及约 5%，估算输入 token 也要下降，才归档并提交。
+- 跨回合继续保留未摘要的工具证据与附件，不再另走首尾裁剪。命令输出没有可靠归档就不清理。
+- 旧工具结果和成功写入正文的默认清理门槛提高到 8k 字符；写参保留最近 2 条 assistant。
+  清理只给身份、状态和读取说明，不再生成多语言结构摘录。失败、完整文件读取等仍受保护。
+- 单个结果超过 80k 或整批超过 200k 字符时才按预算归档；取消 2k bash 提前归档。
+- 每次摘要归档只写新覆盖的消息，并引用上一段。`load_context_history` 自动串联，
+  消息编号连续；旧 checkpoint 不会看到之后新增的归档内容。
 
-`RuntimeState` 会持续记录 generation、读取过的文件范围及次数、各工具调用次数、
-任务进度、改动文件、命令、测试结果和工具 artifact 路径。这些状态会随 checkpoint
-保存，并在摘要时提供给专用模型。
+主请求、摘要和辅助模型调用都检查完整预算，token 仍是估算。摘要优先使用完整可见材料，
+最小合法批次仍放不下才使用有损字段预览。失败、取消或没有足够缩减时保留旧摘要和水位；
+失败及无收益尝试默认冷却 90 秒。45 秒摘要超时是 SDK I/O 超时，不是严格总墙钟期限。
 
-外置的大工具结果只能通过当前 Agent 的只读 `load_tool_output` 工具读取；普通
-`read_file` 不会获得外部 Runtime 数据目录权限。模型也可以主动调用：
+摘要使用四节滚动记忆 prompt，保留目标、有效约束与授权边界、完成结果和验证范围、
+有效决策、未决事项及文件标识符。本批结构化执行记录中的路径由代码逐字提取。
+`summary_char_budget` 来自 `CONTEXT_SUMMARY_MAX_CHARS`，默认 **4000 字符**，不是 token 数；
+按去除首尾空白后的 Python `len()` 检查，标题、换行、空格和标点都计入预算。
+摘要请求不再发送 `max_tokens`，由兼容服务端采用自己的默认输出限制；主模型的
+`MAX_TOKENS` 不变。Anthropic SDK 的 `messages.create` 强制要求该参数，因此省略输出 token 上限的
+摘要请求使用同一 SDK 的 `post` 发送 `/v1/messages`；不接受省略参数的服务端会报错并保留旧摘要。
+完整输出超长时附上原始材料和草稿，要求模型重新压缩一次；重试请求同样检查输入预算。
+若仍超长、为空、未完整结束、超时或异常，保留旧摘要、水位及完整历史，不机械截断。
+只有有效且有压缩收益的摘要才与水位一起提交；后续请求复用该摘要。
 
-```text
-compact()
-```
+`load_tool_output` 和 `load_context_history` 都支持有界分页，整个响应最多 16k 字符，
+并限制到本执行者目录。子 Agent 独立管理归档、压缩回调与内置待办状态。
+`compact()` 可以主动申请压缩，但同样遵守保护窗口、冷却和收益检查。
 
-触发一次手动历史压缩。
+无压力时只测量一次完整请求；请求内容变化才重新测量。使用量、失败原因和历史视图变化
+继续记录，上一份视图的哈希复用已计算结果。完整设计与验证见
+[上下文适配报告](docs/context-management-porting.md)。
 
 可配置项：
 
@@ -485,10 +579,27 @@ SUMMARIZATION_API_KEY=your-summary-api-key  # 留空时与主模型共用 API Ke
 CONTEXT_TOOL_RESULT_BUDGET_CHARS=200000
 CONTEXT_SINGLE_TOOL_OUTPUT_MAX_CHARS=80000
 CONTEXT_COMPACT_THRESHOLD_CHARS=300000
-CONTEXT_SUMMARY_MAX_CHARS=12000
+CONTEXT_SUMMARY_MAX_CHARS=4000              # 字符数，不是 token 数；超长只重压缩一次
 CONTEXT_TRANSCRIPT_DIR=.transcripts              # 旧目录导入位置
 CONTEXT_TOOL_OUTPUT_DIR=.task_outputs/tool-results  # 旧目录导入位置
 CONTEXT_REACTIVE_RETRIES=1
+CONTEXT_RECENCY_MESSAGES=12
+CONTEXT_RECENCY_ROUNDS=2
+CONTEXT_MAX_FOLD_ROUNDS=12
+CONTEXT_MAX_REQUEST_CHARS=600000
+CONTEXT_SUMMARY_INPUT_MAX_CHARS=120000
+CONTEXT_WINDOW_TOKENS=0                     # 未知窗口；不猜厂商值
+CONTEXT_MODEL_WINDOWS_JSON={}                # 按实际模型名覆盖窗口，包含 fallback
+CONTEXT_NEAR_CONTEXT_RATIO=0.8
+CONTEXT_SUMMARY_WINDOW_TOKENS=0
+CONTEXT_SUMMARY_TIMEOUT_SECONDS=45            # SDK I/O timeout，非严格总期限
+CONTEXT_FAILURE_COOLDOWN_SECONDS=90
+CONTEXT_SUMMARY_TEXT_PREVIEW_CHARS=4000
+CONTEXT_SUMMARY_ARGUMENT_PREVIEW_CHARS=2000
+CONTEXT_TOOL_PROJECTION_ENABLED=true       # 有压力时启用，独立于语义摘要开关
+CONTEXT_TOOL_CLEAR_MIN_CHARS=8000
+CONTEXT_WRITE_CLEAR_MIN_CHARS=8000
+CONTEXT_WRITE_KEEP_ROUNDS=2
 ```
 
 权限策略参考 `s03_permission` 的三道闸门：
@@ -560,14 +671,17 @@ MCP_CONFIG=config/mcp.json
 
 ## Agent Team（第一阶段）
 
-Agent Team 只有“关闭”和“显式开启”两种模式，不分析用户文字猜测是否应该组队。启用
-运行时后，在 Web 输入框左下角点亮一次 `Agent Team`，再发送任务；这个开关只作用于
-下一次提交，提交成功后自动复位。仅在 query 中写“使用 Team”不会切换模式。
+当前 Web 已隐藏 `Agent Team` 开关，聊天提交固定使用普通 Agent 模式，不根据用户文字
+自动组队。本机关闭 Team 时使用以下配置，修改后需要重启后端：
 
 ```bash
-TEAM_RUNTIME_ENABLED=true
-TEAM_WRITE_ENABLED=true
+TEAM_RUNTIME_ENABLED=false
+TEAM_WRITE_ENABLED=false
 ```
+
+关闭后不启动 Team Supervisor，并拒绝显式 Team 请求及旧活跃 Team 会话的继续执行。
+已有 Team 数据和 Worktree 不会删除或自动取消；请在新会话使用普通 Agent。同一项目
+仍有未结束 Team 时，Memory 的只读保护继续保留。以下为保留的 Team 实现说明。
 
 显式 Team 请求首先进入只读 `team_planner`：Root 创建或复用普通 Task DAG，并必须调用
 `TeamPlanSubmit`。如果模型只输出文字方案却没有提交工具调用，Runtime 会把本次 Run
