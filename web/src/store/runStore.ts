@@ -44,9 +44,9 @@ type RunStore = {
   ensureRun: (runId: string, status?: RunStatus, queuePosition?: number | null) => void;
   setConnection: (runId: string, connection: ConnectionState) => void;
   mergeEvent: (event: RunEvent) => void;
+  mergeEvents: (events: RunEvent[]) => void;
   setRunStatus: (runId: string, status: RunStatus, error?: string) => void;
   resolveApproval: (runId: string, approvalId: string, status: Approval["status"]) => void;
-  clearRun: (runId: string) => void;
 };
 
 function blankRun(runId: string, status: RunStatus = "queued", queuePosition?: number | null): RunViewState {
@@ -91,6 +91,7 @@ function arrayFrom(payload: Record<string, unknown>, ...keys: string[]) {
 }
 
 function statusFrom(value: unknown, fallback: ActionStatus): ActionStatus {
+  if (value === "unknown") return "unknown";
   if (value === "queued" || value === "waiting" || value === "running" || value === "completed" || value === "failed" || value === "blocked" || value === "cancelled") return value;
   if (value === "success" || value === "finished") return "completed";
   if (value === "error") return "failed";
@@ -126,6 +127,7 @@ function actionKind(type: string): ActionKind | undefined {
 }
 
 function actionStatus(type: string, payload: Record<string, unknown>): ActionStatus {
+  if (type.includes("interrupted")) return "unknown";
   if (type.includes("waiting") || type.includes("approval_requested")) return "waiting";
   if (type.includes("request") || type.includes("queued")) return "queued";
   if (type.includes("start") || type.includes("executing") || type.includes("retrying")) return "running";
@@ -198,9 +200,6 @@ function appendUnique(list: string[], values: unknown[]) {
 }
 
 function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
-  const key = event.id || String(event.seq);
-  if (state.eventKeys[key] || (event.seq > 0 && event.seq <= state.lastSeq && state.events.some((item) => item.seq === event.seq))) return state;
-
   const type = canonicalType(event.type);
   const payload = asRecord(event.payload);
   let next: RunViewState = {
@@ -208,8 +207,6 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
     status: runStatusFromType(type, payload, state.status),
     queuePosition: asNumber(payload.queue_position) ?? state.queuePosition,
     lastSeq: Math.max(state.lastSeq, event.seq),
-    events: [...state.events, event].sort((a, b) => a.seq - b.seq),
-    eventKeys: { ...state.eventKeys, [key]: true },
   };
 
   if (type.includes("text_delta") || type === "assistant_delta" || type === "content_delta") {
@@ -329,7 +326,7 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
     const name = stringFrom(payload, "tool_name", "name", "label");
     const defaultTitle: Record<ActionKind, string> = { model: "模型思考", tool: "执行工具", subagent: "子 Agent", recovery: "错误恢复", context: "整理上下文" };
     const startedAt = existing?.started_at ?? (status === "running" || status === "queued" || status === "waiting" ? event.occurred_at : undefined);
-    const completedAt = status === "completed" || status === "failed" || status === "blocked" || status === "cancelled" ? event.occurred_at : existing?.completed_at;
+    const completedAt = status === "completed" || status === "failed" || status === "blocked" || status === "cancelled" || status === "unknown" ? event.occurred_at : existing?.completed_at;
     const calculatedDuration = startedAt && completedAt ? new Date(completedAt).getTime() - new Date(startedAt).getTime() : undefined;
     next.actions = {
       ...next.actions,
@@ -342,7 +339,7 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
         started_at: startedAt,
         completed_at: completedAt,
         input: payload.input ?? payload.arguments ?? existing?.input,
-        output: payload.output ?? payload.result ?? existing?.output,
+        output: payload.output ?? payload.result ?? payload.reason ?? existing?.output,
         error: stringFrom(payload, "error", "message") ?? existing?.error,
         duration_ms: asNumber(payload.duration_ms) ?? calculatedDuration ?? existing?.duration_ms,
         agent_id: event.agent_id,
@@ -360,19 +357,72 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
   return next;
 }
 
-export const useRunStore = create<RunStore>((set) => ({
+function reduceEvents(state: RunViewState, events: RunEvent[]): RunViewState {
+  // Clone history once per batch, not once per token in a historical replay.
+  const keys = { ...state.eventKeys };
+  const sequences = new Set(state.events.map((event) => event.seq));
+  const appended: RunEvent[] = [];
+  let next = state;
+  let ordered = true;
+  let previousSequence = state.events.at(-1)?.seq ?? -Infinity;
+  for (const event of events) {
+    const key = event.id || String(event.seq);
+    if (keys[key] || (event.seq > 0 && sequences.has(event.seq))) continue;
+    keys[key] = true;
+    sequences.add(event.seq);
+    ordered &&= event.seq >= previousSequence;
+    previousSequence = event.seq;
+    appended.push(event);
+    next = reduceEvent(next, event);
+  }
+  if (!appended.length) return state;
+  const history = [...state.events, ...appended];
+  return { ...next, events: ordered ? history : history.sort((a, b) => a.seq - b.seq), eventKeys: keys };
+}
+
+export function settleRunActions(run: RunViewState): RunViewState {
+  if (!["completed", "cancelled", "failed", "interrupted"].includes(run.status)) return run;
+  const actions = { ...run.actions };
+  for (const [id, action] of Object.entries(actions)) {
+    if (["queued", "running", "waiting"].includes(action.status)) {
+      actions[id] = { ...action, status: "unknown", output: action.output ?? "运行已结束，但没有保存此步骤的结束记录。实际结果未知，请先核实。" };
+    }
+  }
+  return { ...run, actions };
+}
+
+export function buildRunHistory(runId: string, status: RunStatus, events: RunEvent[]): RunViewState {
+  return settleRunActions({ ...reduceEvents(blankRun(runId), [...events].sort((a, b) => a.seq - b.seq)), status, connection: "closed" });
+}
+
+export const useRunStore = create<RunStore>((set, get) => ({
   runs: {},
   ensureRun: (runId, status = "queued", queuePosition) =>
     set((store) => ({ runs: store.runs[runId] ? store.runs : { ...store.runs, [runId]: blankRun(runId, status, queuePosition) } })),
   setConnection: (runId, connection) =>
     set((store) => {
       const run = store.runs[runId] ?? blankRun(runId);
-      return { runs: { ...store.runs, [runId]: { ...run, connection } } };
+      const updated = { ...run, connection };
+      return { runs: { ...store.runs, [runId]: connection === "closed" ? settleRunActions(updated) : updated } };
     }),
-  mergeEvent: (event) =>
+  mergeEvent: (event) => get().mergeEvents([event]),
+  mergeEvents: (events) =>
     set((store) => {
-      const run = store.runs[event.run_id] ?? blankRun(event.run_id);
-      return { runs: { ...store.runs, [event.run_id]: reduceEvent(run, event) } };
+      const grouped = new Map<string, RunEvent[]>();
+      for (const event of events) {
+        const batch = grouped.get(event.run_id);
+        if (batch) batch.push(event);
+        else grouped.set(event.run_id, [event]);
+      }
+      let runs = store.runs;
+      for (const [runId, batch] of grouped) {
+        const previous = runs[runId] ?? blankRun(runId);
+        const next = reduceEvents(previous, batch);
+        if (next === previous) continue;
+        if (runs === store.runs) runs = { ...runs };
+        runs[runId] = next;
+      }
+      return runs === store.runs ? store : { runs };
     }),
   setRunStatus: (runId, status, error) =>
     set((store) => {
@@ -390,12 +440,6 @@ export const useRunStore = create<RunStore>((set) => ({
           [runId]: { ...run, approvals: { ...run.approvals, [approvalId]: { ...approval, status } } },
         },
       };
-    }),
-  clearRun: (runId) =>
-    set((store) => {
-      const runs = { ...store.runs };
-      delete runs[runId];
-      return { runs };
     }),
 }));
 

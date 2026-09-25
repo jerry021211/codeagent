@@ -1,4 +1,5 @@
 export type Identifier = string;
+export type ExecutionMode = "normal" | "discuss";
 
 export type RunStatus =
   | "queued"
@@ -19,7 +20,9 @@ export type Conversation = {
   archived_at?: string | null;
   last_message?: string | null;
   active_run_id?: Identifier | null;
+  latest_run_id?: Identifier | null;
   run_status?: RunStatus | null;
+  waiting_for_answer?: boolean;
   active_task_list_id?: Identifier | null;
 };
 
@@ -72,6 +75,7 @@ export type Message = {
   created_at: string;
   run_id?: Identifier | null;
   status?: "streaming" | "complete" | "failed";
+  metadata?: { mode?: ExecutionMode; [key: string]: unknown };
 };
 
 export type TokenUsage = {
@@ -392,7 +396,7 @@ export type PromptTrace = {
 };
 
 export type ActionKind = "model" | "tool" | "subagent" | "recovery" | "context";
-export type ActionStatus = "queued" | "waiting" | "running" | "completed" | "failed" | "blocked" | "cancelled";
+export type ActionStatus = "queued" | "waiting" | "running" | "completed" | "failed" | "blocked" | "cancelled" | "unknown";
 
 export type RunAction = {
   id: string;
@@ -430,3 +434,13 @@ export type RecoveryRecord = {
 };
 
 export type ApiList<T> = T[] | { items: T[] } | { data: T[] };
+export interface UserQuestion {
+  id: string;
+  run_id: string;
+  question: string;
+  options: string[];
+  answer: string | null;
+  status: "pending" | "answered" | "cancelled";
+  created_at: string;
+  resolved_at: string | null;
+}

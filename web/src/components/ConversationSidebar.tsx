@@ -1,4 +1,4 @@
-import { Archive, Bot, FolderGit2, MessageSquare, Plus, Search, X } from "lucide-react";
+import { Archive, Bot, FolderGit2, MessageSquare, Plus, Search, Trash2, X } from "lucide-react";
 import type { Conversation } from "@/types/api";
 import { cx, formatRelativeTime, isRunActive, statusLabel } from "@/lib/utils";
 import { IconButton, Skeleton, StatusDot } from "@/components/ui";
@@ -14,6 +14,8 @@ type Props = {
   onSelect: (id: string) => void;
   onCreate: () => void;
   onArchive: (conversation: Conversation) => void;
+  onDelete: (conversation: Conversation) => void;
+  deletingId?: string;
   onClose?: () => void;
 };
 
@@ -84,14 +86,15 @@ export function ConversationSidebar(props: Props) {
                   onClick={() => props.onSelect(conversation.id)}
                   className="min-w-0 flex-1 px-3 py-2.5 text-left focus-visible:rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                 >
-                  <span className="flex items-center gap-2">
+                  <span className="flex items-center gap-2 pr-14">
                     <span className="truncate text-xs font-medium">{conversation.title || "新会话"}</span>
                     {conversation.run_status && (
                       <StatusDot
-                        status={running ? (conversation.run_status === "waiting_approval" ? "warning" : "running") : conversation.run_status === "failed" ? "error" : "success"}
+                        status={running ? (conversation.waiting_for_answer || conversation.run_status === "waiting_approval" ? "warning" : "running") : conversation.run_status === "failed" ? "error" : "success"}
                         pulse={running}
                       />
                     )}
+                    {conversation.waiting_for_answer && <span className="shrink-0 text-[10px] text-amber-400">待回答</span>}
                   </span>
                   <span className="mt-1 flex items-center justify-between gap-2 text-[10px] text-sidebar-muted">
                     <span className="truncate">{conversation.last_message || (conversation.run_status ? statusLabel[conversation.run_status] : "等待消息")}</span>
@@ -101,15 +104,28 @@ export function ConversationSidebar(props: Props) {
                     <FolderGit2 className="size-2.5 shrink-0" /><span className="truncate">{workspaceName(conversation.workspace)}</span>
                   </span>
                 </button>
-                <button
-                  type="button"
-                  aria-label={`归档 ${conversation.title}`}
-                  title="归档"
-                  onClick={() => props.onArchive(conversation)}
-                  className="absolute right-2 top-2 grid size-7 place-items-center rounded-lg bg-sidebar text-sidebar-muted opacity-0 transition hover:text-white focus-visible:opacity-100 focus-visible:outline-none group-hover:opacity-100"
-                >
-                  <Archive className="size-3.5" />
-                </button>
+                <div className={cx("absolute right-2 top-2 flex gap-1 rounded-lg bg-sidebar transition group-hover:opacity-100 group-focus-within:opacity-100", props.mobile ? "opacity-100" : "opacity-0")}>
+                  <button
+                    type="button"
+                    aria-label={`归档 ${conversation.title}`}
+                    title="归档"
+                    onClick={() => props.onArchive(conversation)}
+                    disabled={props.deletingId === conversation.id}
+                    className="grid size-7 place-items-center rounded-lg text-sidebar-muted transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-40"
+                  >
+                    <Archive className="size-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`删除 ${conversation.title}`}
+                    title={running ? "请先停止任务再删除" : "删除会话"}
+                    disabled={running || Boolean(props.deletingId)}
+                    onClick={() => props.onDelete(conversation)}
+                    className="grid size-7 place-items-center rounded-lg text-sidebar-muted transition hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
+                </div>
               </div>
             );
           })}

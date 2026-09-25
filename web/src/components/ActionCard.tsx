@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Bot, ChevronDown, CircleAlert, FileCode2, GitBranch, Hammer, RefreshCcw, Sparkles } from "lucide-react";
+import { memo, useState } from "react";
+import { ChevronDown, CircleAlert, FileCode2, GitBranch, Hammer, RefreshCcw, Sparkles } from "lucide-react";
 import type { RunAction } from "@/types/api";
 import { cx, formatDuration, prettyJson } from "@/lib/utils";
 import { Spinner, StatusDot } from "@/components/ui";
@@ -20,9 +20,10 @@ const statusText: Record<RunAction["status"], string> = {
   failed: "失败",
   blocked: "已阻止",
   cancelled: "已取消",
+  unknown: "结果未知",
 };
 
-export function ActionCard({ action }: { action: RunAction }) {
+export const ActionCard = memo(function ActionCard({ action }: { action: RunAction }) {
   const [expanded, setExpanded] = useState(action.status === "failed");
   const meta = kindMeta[action.kind];
   const Icon = meta.icon;
@@ -68,7 +69,7 @@ export function ActionCard({ action }: { action: RunAction }) {
       )}
     </div>
   );
-}
+});
 
 function Detail({ label, value }: { label: string; value: unknown }) {
   return (

@@ -1,5 +1,7 @@
 import type {
+  UserQuestion,
   ApiList,
+  ExecutionMode,
   ApprovalDecision,
   Conversation,
   CreateRunResponse,
@@ -7,6 +9,8 @@ import type {
   McpConfig,
   SaveMcpServer,
   Run,
+  RunEvent,
+  RunStatus,
   RuntimeConfig,
   TaskList,
   TaskResource,
@@ -50,6 +54,26 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  async getRunActivity(runId: string) {
+    const events: RunEvent[] = [];
+    let after = 0;
+    for (;;) {
+      const page = await request<{ run_id: string; status: RunStatus; events: RunEvent[]; next_after: number | null }>(`/runs/${encodeURIComponent(runId)}/activity?after=${after}`);
+      events.push(...page.events);
+      if (page.next_after == null) return { runId, status: page.status, events };
+      after = page.next_after;
+    }
+  },
+  listQuestions(runId: string) {
+    return request<UserQuestion[]>(`/runs/${encodeURIComponent(runId)}/questions`);
+  },
+
+  answerQuestion(runId: string, questionId: string, answer: string) {
+    return request<UserQuestion>(`/runs/${encodeURIComponent(runId)}/questions/${encodeURIComponent(questionId)}/answer`, {
+      method: "POST", body: JSON.stringify({ answer }),
+    });
+  },
+
   async listConversations(options?: { archived?: boolean; search?: string }) {
     const params = new URLSearchParams();
     if (options?.archived != null) params.set("archived", String(options.archived));
@@ -65,9 +89,11 @@ export const api = {
     });
   },
 
-  listWorkspaces(path?: string) {
-    const query = path ? `?path=${encodeURIComponent(path)}` : "";
-    return request<WorkspaceListing>(`/workspaces${query}`);
+  listWorkspaces(path?: string, query?: string) {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    if (query) params.set("query", query);
+    return request<WorkspaceListing>(`/workspaces${params.size ? `?${params}` : ""}`);
   },
 
   getConversation(id: string) {
@@ -79,6 +105,10 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(patch),
     });
+  },
+
+  deleteConversation(id: string) {
+    return request<void>(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
 
   async listMessages(conversationId: string) {
@@ -104,17 +134,10 @@ export const api = {
     });
   },
 
-  updateTask(taskListId: string, taskId: string, patch: Record<string, unknown> & { expectedRevision: number }) {
-    return request<TaskResource>(`/task-lists/${encodeURIComponent(taskListId)}/tasks/${encodeURIComponent(taskId)}`, {
-      method: "PATCH",
-      body: JSON.stringify(patch),
-    });
-  },
-
-  createRun(conversationId: string, content: string, useTeam = false) {
+  createRun(conversationId: string, content: string, useTeam = false, mode: ExecutionMode = "normal") {
     return request<CreateRunResponse>(`/conversations/${encodeURIComponent(conversationId)}/runs`, {
       method: "POST",
-      body: JSON.stringify({ content, useTeam }),
+      body: JSON.stringify({ content, useTeam, mode }),
     });
   },
 

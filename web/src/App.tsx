@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { cx, isRunActive } from "@/lib/utils";
-import type { ApprovalDecision, Conversation, McpConfig, Message, SaveMcpServer, TaskResource } from "@/types/api";
+import type { ApprovalDecision, Conversation, ExecutionMode, McpConfig, Message, SaveMcpServer, TaskResource } from "@/types/api";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import { ChatWorkspace } from "@/components/ChatWorkspace";
 import { InspectorPanel } from "@/components/InspectorPanel";
 import { WorkspacePicker } from "@/components/WorkspacePicker";
 import { McpConfigModal } from "@/components/McpConfigModal";
 import { useRunEvents } from "@/hooks/useRunEvents";
+import { useConversationActivity } from "@/hooks/useConversationActivity";
 import { useRunStore } from "@/store/runStore";
 
 type ThemeMode = "system" | "light" | "dark";
@@ -31,14 +32,32 @@ export default function App() {
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | undefined>(() => localStorage.getItem("codeagent.conversation") || undefined);
   const [search, setSearch] = useState("");
-  const [draft, setDraft] = useState("");
-  const [useTeam, setUseTeam] = useState(false);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const draft = selectedId ? drafts[selectedId] ?? "" : "";
+  const setDraft = (value: string) => {
+    if (selectedId) setDrafts((current) => ({ ...current, [selectedId]: value }));
+  };
+  const sendingConversations = useMutationState({
+    filters: { mutationKey: ["send-run"], status: "pending" },
+    select: (mutation) => (mutation.state.variables as { conversationId: string }).conversationId,
+  });
+  const cancellingRuns = useMutationState({
+    filters: { mutationKey: ["cancel-run"], status: "pending" },
+    select: (mutation) => mutation.state.variables as string,
+  });
+  const decidingRuns = useMutationState({
+    filters: { mutationKey: ["decide-approval"], status: "pending" },
+    select: (mutation) => (mutation.state.variables as { targetRunId: string }).targetRunId,
+  });
+  const sending = Boolean(selectedId && sendingConversations.includes(selectedId));
+  const [modes, setModes] = useState<Record<string, ExecutionMode>>({});
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
   const [runIds, setRunIds] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState<string>();
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [workspacePath, setWorkspacePath] = useState<string>();
+  const [workspaceSearch, setWorkspaceSearch] = useState("");
   const [mcpOpen, setMcpOpen] = useState(false);
   const [mcpMessage, setMcpMessage] = useState<string>();
   const { theme, cycleTheme } = useTheme();
@@ -46,7 +65,7 @@ export default function App() {
   const conversationsQuery = useQuery({
     queryKey: conversationsKey,
     queryFn: () => api.listConversations({ archived: false }),
-    refetchInterval: 15_000,
+    refetchInterval: (query) => query.state.data?.some((item) => isRunActive(item.run_status)) ? 2_000 : 15_000,
   });
   const conversations = conversationsQuery.data ?? [];
   const filteredConversations = useMemo(() => {
@@ -72,7 +91,7 @@ export default function App() {
     queryFn: () => api.getConversation(selectedId!),
     enabled: Boolean(selectedId),
   });
-  const selectedConversation = conversationQuery.data ?? conversations.find((item) => item.id === selectedId);
+  const selectedConversation = conversations.find((item) => item.id === selectedId) ?? conversationQuery.data;
   const taskListId = selectedConversation?.active_task_list_id ?? undefined;
   const messagesQuery = useQuery({
     queryKey: messagesKey(selectedId ?? ""),
@@ -80,6 +99,14 @@ export default function App() {
     enabled: Boolean(selectedId),
   });
   const runtimeQuery = useQuery({ queryKey: ["runtime-config"], queryFn: api.getRuntimeConfig, staleTime: 60_000 });
+  const lastUserMessage = [...(messagesQuery.data ?? [])].reverse().find((message) => message.role === "user");
+  const mode: ExecutionMode = modes[selectedId ?? ""] ?? lastUserMessage?.metadata?.mode ?? "normal";
+  const selectMode = (value: ExecutionMode) => {
+    if (selectedId) setModes((current) => ({ ...current, [selectedId]: value }));
+  };
+  const toggleDiscuss = () => {
+    if (selectedId) setModes((current) => ({ ...current, [selectedId]: mode === "discuss" ? "normal" : "discuss" }));
+  };
   const teamEnabled = Boolean(runtimeQuery.data?.features?.agent_team);
   const teamsQuery = useQuery({
     queryKey: teamsKey(selectedId ?? ""),
@@ -95,9 +122,6 @@ export default function App() {
   }, [teamsQuery.data]);
   const teamLeadActive = Boolean(team && !["completed", "failed", "cancelled", "closed_with_unmerged_candidates"].includes(team.team.state));
 
-  useEffect(() => {
-    setUseTeam(false);
-  }, [selectedId]);
   const taskListQuery = useQuery({
     queryKey: ["task-lists", taskListId],
     queryFn: () => api.getTaskList(taskListId!),
@@ -112,8 +136,8 @@ export default function App() {
     ? { ...runtimeQuery.data, workspace: selectedConversation?.workspace ?? runtimeQuery.data.workspace }
     : runtimeQuery.data;
   const workspacesQuery = useQuery({
-    queryKey: ["workspaces", workspacePath ?? "default"],
-    queryFn: () => api.listWorkspaces(workspacePath),
+    queryKey: ["workspaces", workspacePath ?? "default", workspaceSearch],
+    queryFn: () => api.listWorkspaces(workspacePath, workspaceSearch),
     enabled: workspacePickerOpen,
     retry: false,
   });
@@ -124,8 +148,9 @@ export default function App() {
     enabled: mcpOpen && Boolean(mcpWorkspace),
   });
 
-  const runId = selectedId ? runIds[selectedId] ?? selectedConversation?.active_run_id ?? undefined : undefined;
+  const runId = selectedId ? selectedConversation?.active_run_id ?? runIds[selectedId] ?? selectedConversation?.latest_run_id ?? undefined : undefined;
   const liveRun = useRunEvents(runId);
+  const activityQuery = useConversationActivity(selectedId ?? undefined, messagesQuery.data ?? [], liveRun);
   const ensureRun = useRunStore((state) => state.ensureRun);
   const setRunStatus = useRunStore((state) => state.setRunStatus);
   const resolveApproval = useRunStore((state) => state.resolveApproval);
@@ -164,10 +189,18 @@ export default function App() {
 
   useEffect(() => {
     if (!runId) return;
+    let disposed = false;
+    const initialSeq = useRunStore.getState().runs[runId]?.lastSeq ?? 0;
     void api.getRun(runId).then((run) => {
+      if (disposed) return;
       ensureRun(run.id, run.status, run.queue_position);
-      setRunStatus(run.id, run.status, run.error ?? undefined);
+      const current = useRunStore.getState().runs[run.id];
+      // An HTTP snapshot must not overwrite newer progress/terminal SSE events.
+      if (current && current.lastSeq === initialSeq && current.connection !== "closed") {
+        setRunStatus(run.id, run.status, run.error ?? undefined);
+      }
     }).catch(() => undefined);
+    return () => { disposed = true; };
   }, [ensureRun, runId, setRunStatus]);
 
   useEffect(() => {
@@ -183,9 +216,9 @@ export default function App() {
       queryClient.setQueryData<Conversation[]>(conversationsKey, (current = []) => [conversation, ...current.filter((item) => item.id !== conversation.id)]);
       setSelectedId(conversation.id);
       setLeftOpen(false);
-      setDraft("");
       setWorkspacePickerOpen(false);
       setWorkspacePath(undefined);
+      setWorkspaceSearch("");
     },
     onError: (error) => showError(error, setNotice),
   });
@@ -199,23 +232,61 @@ export default function App() {
     onError: (error) => showError(error, setNotice),
   });
 
+  const deleteConversation = useMutation({
+    mutationFn: (conversation: Conversation) => api.deleteConversation(conversation.id),
+    onSuccess: async (_, conversation) => {
+      await queryClient.cancelQueries({ queryKey: conversationsKey });
+      await queryClient.cancelQueries({ queryKey: teamsKey(conversation.id) });
+      queryClient.setQueryData<Conversation[]>(conversationsKey, (current = []) => current.filter((item) => item.id !== conversation.id));
+      setSelectedId((current) => current === conversation.id ? undefined : current);
+      queryClient.removeQueries({ queryKey: ["conversations", conversation.id] });
+      queryClient.removeQueries({ queryKey: teamsKey(conversation.id) });
+      for (const setter of [setDrafts, setRunIds]) {
+        setter((current) => {
+          const next = { ...current };
+          delete next[conversation.id];
+          return next;
+        });
+      }
+      setModes((current) => {
+        const next = { ...current };
+        delete next[conversation.id];
+        return next;
+      });
+    },
+    onError: (error) => showError(error, setNotice),
+  });
+  const confirmDeleteConversation = (conversation: Conversation) => {
+    if (sendingConversations.includes(conversation.id)) {
+      setNotice("消息正在发送，请等待任务结束后再删除会话。");
+      return;
+    }
+    if (window.confirm(`确定永久删除会话「${conversation.title || "新会话"}」？\n聊天记录和运行记录将被删除，无法恢复。工作区文件会保留。`)) {
+      deleteConversation.mutate(conversation);
+    }
+  };
+
   const sendRun = useMutation({
-    mutationFn: async ({ conversationId, content, useTeam }: { conversationId: string; content: string; useTeam: boolean }) => {
-      const result = await api.createRun(conversationId, content, useTeam);
+    mutationKey: ["send-run"],
+    mutationFn: async ({ conversationId, content, mode: submittedMode }: { conversationId: string; content: string; mode: ExecutionMode }) => {
+      const result = await api.createRun(conversationId, content, false, submittedMode);
       return { ...result, content, conversationId };
     },
     onSuccess: (result) => {
       ensureRun(result.run_id, result.status, result.queue_position);
       setRunIds((current) => ({ ...current, [result.conversationId]: result.run_id }));
-      setDraft("");
-      setUseTeam(false);
+      setDrafts((current) => current[result.conversationId]?.trim() === result.content
+        ? { ...current, [result.conversationId]: "" } : current);
       void queryClient.invalidateQueries({ queryKey: conversationsKey });
-      window.setTimeout(() => void queryClient.invalidateQueries({ queryKey: messagesKey(result.conversationId) }), 150);
     },
     onError: (error) => showError(error, setNotice),
+    onSettled: (_, __, variables) => {
+      void queryClient.invalidateQueries({ queryKey: messagesKey(variables.conversationId) });
+    },
   });
 
   const cancelRun = useMutation({
+    mutationKey: ["cancel-run"],
     mutationFn: (targetRunId: string) => api.cancelRun(targetRunId),
     onMutate: (targetRunId) => setRunStatus(targetRunId, "cancelling"),
     onError: (error, targetRunId) => {
@@ -225,6 +296,7 @@ export default function App() {
   });
 
   const decideApproval = useMutation({
+    mutationKey: ["decide-approval"],
     mutationFn: ({ targetRunId, approvalId, decision }: { targetRunId: string; approvalId: string; decision: ApprovalDecision }) => api.decideApproval(targetRunId, approvalId, decision),
     onMutate: ({ targetRunId, approvalId, decision }) => resolveApproval(targetRunId, approvalId, decision === "allow" ? "allowed" : "denied"),
     onError: (error, variables) => {
@@ -280,7 +352,7 @@ export default function App() {
     mutationFn: (server: SaveMcpServer) => api.saveMcpServer(server),
     onSuccess: (config) => {
       queryClient.setQueryData<McpConfig>(["mcp-servers", config.workspace], config);
-      setMcpMessage(config.restart_required ? "配置已保存。当前有任务占用运行时，请重启 CodeAgent 后使用。" : "配置已保存，下一条消息会自动加载新工具。");
+      setMcpMessage(config.restart_required ? "配置已保存。请重启 CodeAgent 后使用。" : "配置已保存，后续任务会加载新工具；当前任务继续使用原连接。");
     },
   });
 
@@ -288,22 +360,32 @@ export default function App() {
     mutationFn: ({ workspace, name }: { workspace: string; name: string }) => api.deleteMcpServer(workspace, name),
     onSuccess: (config) => {
       queryClient.setQueryData<McpConfig>(["mcp-servers", config.workspace], config);
-      setMcpMessage(config.restart_required ? "配置已删除。当前有任务占用运行时，请重启 CodeAgent。" : "配置已删除，运行时缓存已刷新。");
+      setMcpMessage(config.restart_required ? "配置已删除。请重启 CodeAgent。" : "配置已删除，后续任务使用新配置；当前任务继续使用原连接。");
     },
   });
 
   const continueTask = (task: TaskResource) => {
-    if (!selectedId || liveRun && isRunActive(liveRun.status)) return;
+    if (mode === "discuss") {
+      setNotice("请先切回 Code · 编码，再执行任务。");
+      return;
+    }
+    if (!selectedId || sending || liveRun && isRunActive(liveRun.status)) return;
     sendRun.mutate({
       conversationId: selectedId,
       content: `继续处理 Task #${task.task.id}：${task.task.subject}。先读取 TaskGet，按 description 的完成条件执行，并及时用 TaskUpdate 更新状态。`,
-      useTeam: false,
+      mode,
     });
   };
 
   const send = () => {
     const content = draft.trim();
+    if (sending || messagesQuery.isLoading) return;
     if (!selectedId || !content || liveRun && isRunActive(liveRun.status)) return;
+    if (content.toLowerCase() === "/discuss" && !teamLeadActive) {
+      toggleDiscuss();
+      setDraft("");
+      return;
+    }
     const optimistic: Message = {
       id: `optimistic:${Date.now()}`,
       conversation_id: selectedId,
@@ -311,9 +393,10 @@ export default function App() {
       content,
       created_at: new Date().toISOString(),
       status: "complete",
+      metadata: { mode },
     };
     queryClient.setQueryData<Message[]>(messagesKey(selectedId), (current = []) => [...current, optimistic]);
-    sendRun.mutate({ conversationId: selectedId, content, useTeam });
+    sendRun.mutate({ conversationId: selectedId, content, mode });
   };
 
   const teamPanelProps = {
@@ -334,18 +417,18 @@ export default function App() {
     <div className="h-dvh min-h-[520px] overflow-hidden bg-canvas text-ink">
       <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[264px_minmax(0,1fr)] xl:grid-cols-[264px_minmax(0,1fr)_320px]">
         <div className="hidden min-h-0 lg:block">
-          <ConversationSidebar conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} onSearch={setSearch} onSelect={setSelectedId} onCreate={() => setWorkspacePickerOpen(true)} onArchive={(conversation) => archiveConversation.mutate(conversation)} />
+          <ConversationSidebar conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} onSearch={setSearch} onSelect={setSelectedId} onCreate={() => setWorkspacePickerOpen(true)} onArchive={(conversation) => archiveConversation.mutate(conversation)} onDelete={confirmDeleteConversation} deletingId={deleteConversation.isPending ? deleteConversation.variables.id : undefined} />
         </div>
 
         <div className="relative flex min-h-0 min-w-0 flex-col">
-          <ChatWorkspace title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sendRun.isPending} cancelling={cancelRun.isPending} approval={pendingApproval} approvalBusy={decideApproval.isPending} runtimeModel={runtimeQuery.data?.model} teamAvailable={teamEnabled} useTeam={useTeam} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onUseTeam={setUseTeam} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
+          <ChatWorkspace historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} discussMode={mode === "discuss"} onModeChange={selectMode} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approval={pendingApproval} approvalBusy={Boolean(runId && decidingRuns.includes(runId))} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
         </div>
 
         <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} {...teamPanelProps} /></div>
       </div>
 
       <Drawer open={leftOpen} side="left" onClose={() => setLeftOpen(false)}>
-        <ConversationSidebar mobile conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} onSearch={setSearch} onSelect={(id) => { setSelectedId(id); setLeftOpen(false); }} onCreate={() => { setLeftOpen(false); setWorkspacePickerOpen(true); }} onArchive={(conversation) => archiveConversation.mutate(conversation)} onClose={() => setLeftOpen(false)} />
+        <ConversationSidebar mobile conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} onSearch={setSearch} onSelect={(id) => { setSelectedId(id); setLeftOpen(false); }} onCreate={() => { setLeftOpen(false); setWorkspacePickerOpen(true); }} onArchive={(conversation) => archiveConversation.mutate(conversation)} onDelete={confirmDeleteConversation} deletingId={deleteConversation.isPending ? deleteConversation.variables.id : undefined} onClose={() => setLeftOpen(false)} />
       </Drawer>
       <Drawer open={rightOpen} side="right" onClose={() => setRightOpen(false)} width="min(90vw, 360px)"><InspectorPanel mobile run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} onClose={() => setRightOpen(false)} {...teamPanelProps} /></Drawer>
 
@@ -355,9 +438,10 @@ export default function App() {
         loading={workspacesQuery.isFetching || createConversation.isPending}
         listing={workspacesQuery.data}
         error={workspacesQuery.error ? errorMessage(workspacesQuery.error) : undefined}
-        onBrowse={(path) => setWorkspacePath(path)}
+        onBrowse={(path) => { setWorkspacePath(path); setWorkspaceSearch(""); }}
+        onSearch={setWorkspaceSearch}
         onConfirm={(path) => createConversation.mutate(path)}
-        onClose={() => { if (!createConversation.isPending) { setWorkspacePickerOpen(false); setWorkspacePath(undefined); } }}
+        onClose={() => { if (!createConversation.isPending) { setWorkspacePickerOpen(false); setWorkspacePath(undefined); setWorkspaceSearch(""); } }}
       />
 
       <McpConfigModal

@@ -1,33 +1,38 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, CircleStop, Menu, Monitor, Moon, PanelRight, Plug, Send, Sparkles, Square, Sun, Users, Wifi, WifiOff } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Approval, ApprovalDecision, Message, RunStatus } from "@/types/api";
+import type { Approval, ApprovalDecision, ExecutionMode, Message } from "@/types/api";
 import type { RunViewState } from "@/store/runStore";
 import { cx, formatTime, isRunActive, statusLabel } from "@/lib/utils";
-import { ActionCard } from "@/components/ActionCard";
+import { getRunAnswer } from "@/lib/runAnswer";
+import { ThinkingProcess } from "@/components/ThinkingProcess";
+import { processAnchors } from "@/lib/conversationProcess";
 import { ApprovalBanner } from "@/components/ApprovalBanner";
 import { EmptyPanel, IconButton, Spinner, StatusDot } from "@/components/ui";
-import { RunTimeline } from "@/components/RunTimeline";
+import { ModeSelector } from "@/components/ModeSelector";
+import { UserQuestions } from "@/components/UserQuestions";
 
 type Props = {
   title?: string;
   messages: Message[];
   loading?: boolean;
   run?: RunViewState;
+  historyRuns?: Record<string, RunViewState>;
+  historyLoading?: boolean;
+  historyError?: boolean;
   draft: string;
   sending?: boolean;
   cancelling?: boolean;
   approval?: Approval;
   approvalBusy?: boolean;
   runtimeModel?: string | null;
-  teamAvailable?: boolean;
-  useTeam?: boolean;
   teamLeadActive?: boolean;
+  discussMode?: boolean;
+  onModeChange: (mode: ExecutionMode) => void;
   workspace?: string;
   theme: "system" | "light" | "dark";
   onDraft: (value: string) => void;
-  onUseTeam: (value: boolean) => void;
   onSend: () => void;
   onCancel: () => void;
   onApprovalDecision: (decision: ApprovalDecision) => void;
@@ -41,14 +46,16 @@ export function ChatWorkspace(props: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [following, setFollowing] = useState(true);
-  const actions = props.run ? props.run.actionOrder.map((id) => props.run?.actions[id]).filter((item): item is NonNullable<typeof item> => Boolean(item)) : [];
   const active = isRunActive(props.run?.status);
-  const showStreaming = Boolean(props.run?.streamingText) && !props.messages.some((message) => message.run_id === props.run?.runId && message.role === "assistant" && message.content === props.run?.streamingText);
+  const runs = useMemo(() => ({ ...props.historyRuns, ...(props.run ? { [props.run.runId]: props.run } : {}) }), [props.historyRuns, props.run]);
+  const anchors = useMemo(() => processAnchors(props.messages, Object.keys(runs)), [props.messages, runs]);
+  const process = (id: string) => runs[id] ? <ThinkingProcess key={id} run={runs[id]} /> : null;
+  const answer = useMemo(() => props.run ? getRunAnswer(props.run, props.messages) : undefined, [props.run?.runId, props.run?.events, props.run?.status, props.messages]);
 
   useEffect(() => {
     if (!following) return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [props.messages, props.run?.streamingText, props.run?.actionOrder.length, following]);
+  }, [props.messages, answer?.text, props.run?.actionOrder.length, following]);
 
   useEffect(() => {
     const input = inputRef.current;
@@ -73,10 +80,9 @@ export function ChatWorkspace(props: Props) {
           <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[10px] text-ink-muted">
             {props.run ? (
               <>
-                <StatusDot status={active ? props.run.status === "waiting_approval" ? "warning" : "running" : props.run.status === "failed" ? "error" : "success"} pulse={active} />
+                <StatusDot status={active ? props.run.status === "waiting_approval" ? "warning" : "running" : props.run.status === "failed" || props.run.status === "interrupted" ? "error" : props.run.status === "completed" ? "success" : "idle"} pulse={active} />
                 <span>{statusLabel[props.run.status]}</span>
-                <span aria-hidden>·</span>
-                {props.run.connection === "live" ? <Wifi className="size-3 text-success" /> : props.run.connection === "reconnecting" ? <><Spinner className="size-3" /><span>重连中</span></> : <WifiOff className="size-3" />}
+                {active && <><span aria-hidden>·</span>{props.run.connection === "live" ? <Wifi className="size-3 text-success" /> : props.run.connection === "reconnecting" ? <><Spinner className="size-3" /><span>重连中</span></> : <WifiOff className="size-3" />}</>}
               </>
             ) : (
               <><span className="size-1.5 rounded-full bg-success" /><span className="truncate">{props.runtimeModel || "本地 Agent"}</span></>
@@ -91,8 +97,6 @@ export function ChatWorkspace(props: Props) {
         <IconButton label="打开运行面板" onClick={props.onOpenRight} className="xl:hidden"><PanelRight className="size-4" /></IconButton>
       </header>
 
-      {props.run && <RunTimeline run={props.run} />}
-
       <div
         ref={scrollRef}
         onScroll={(event) => {
@@ -103,27 +107,27 @@ export function ChatWorkspace(props: Props) {
       >
         {!props.loading && props.messages.length === 0 && !props.run && (
           <div className="grid min-h-full place-items-center">
-            <EmptyPanel icon={<Sparkles className="size-5" />} title="准备开始编码" body="描述你希望完成的工作。Agent 的模型调用、工具、TODO、子 Agent 和恢复过程都会在这里实时呈现。" />
+            <EmptyPanel icon={<Sparkles className="size-5" />} title="准备开始编码" body="描述你希望完成的工作。你可以随时展开 Thinking 查看探索、修改与执行进度。" />
           </div>
         )}
         {props.loading && <div className="flex min-h-full items-center justify-center gap-2 text-xs text-ink-muted"><Spinner /> 加载会话…</div>}
         {!props.loading && (props.messages.length > 0 || props.run) && (
           <div className="mx-auto w-full max-w-4xl px-4 py-6 sm:px-7 sm:py-8">
             <div className="space-y-6">
-              {props.messages.map((message) => <ChatMessage key={message.id} message={message} />)}
-              {actions.length > 0 && (
-                <section className="ml-0 space-y-2 sm:ml-11" aria-label="Agent 动作">
-                  <div className="mb-2 flex items-center gap-2 px-1 text-[10px] font-bold uppercase tracking-[0.16em] text-ink-faint"><Bot className="size-3.5" /> Agent actions</div>
-                  {actions.map((action) => <ActionCard key={action.id} action={action} />)}
-                </section>
-              )}
-              {showStreaming && (
+              {props.messages.map((message) => (
+                <Fragment key={message.id}>
+                  {anchors.before[message.id]?.map(process)}
+                  <ChatMessage message={message} />
+                  {anchors.after[message.id]?.map(process)}
+                </Fragment>
+              ))}
+              {anchors.trailing.map(process)}
+              {props.historyLoading && <div className="text-xs text-ink-muted">加载历史执行记录…</div>}
+              {props.historyError && <div className="text-xs text-danger">历史执行记录加载失败，请刷新重试。</div>}
+              {answer && (
                 <ChatMessage
-                  message={{ id: `${props.run?.runId}:stream`, conversation_id: "", role: "assistant", content: props.run?.streamingText ?? "", created_at: new Date().toISOString(), status: "streaming" }}
+                  message={{ id: `${props.run?.runId}:stream`, conversation_id: "", role: "assistant", content: answer.text, created_at: props.run?.events.at(-1)?.occurred_at ?? "", status: answer.streaming ? "streaming" : "complete" }}
                 />
-              )}
-              {active && !showStreaming && actions.length === 0 && (
-                <div className="flex items-center gap-3 text-xs text-ink-muted"><span className="grid size-8 place-items-center rounded-xl bg-accent/10 text-accent"><Spinner /></span> Agent 正在准备…</div>
               )}
               {props.run?.error && <div className="rounded-xl border border-danger/25 bg-danger/5 px-4 py-3 text-xs text-danger">{props.run.error}</div>}
             </div>
@@ -136,6 +140,7 @@ export function ChatWorkspace(props: Props) {
           <button type="button" onClick={() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" })} className="mx-auto mb-2 block rounded-full border border-line bg-surface px-3 py-1 text-[10px] text-ink-muted shadow-sm hover:text-ink">回到最新消息</button>
         )}
         <div className="mx-auto max-w-4xl space-y-2">
+          {props.run && <UserQuestions key={props.run.runId} runId={props.run.runId} active={active && props.run.status !== "cancelling"} />}
           {props.approval && (
             <ApprovalBanner
               approval={props.approval}
@@ -143,7 +148,7 @@ export function ChatWorkspace(props: Props) {
               onDecision={props.onApprovalDecision}
             />
           )}
-          <div className="rounded-2xl border border-line-strong bg-surface p-2 shadow-panel transition focus-within:border-accent/35 focus-within:ring-4 focus-within:ring-accent/[0.06]">
+          <div className="rounded-2xl border border-line-strong bg-surface p-2 shadow-sm transition focus-within:border-accent/35 focus-within:ring-accent/[0.06]">
           <textarea
             ref={inputRef}
             value={props.draft}
@@ -151,35 +156,26 @@ export function ChatWorkspace(props: Props) {
             onKeyDown={onKeyDown}
             rows={1}
             disabled={active}
-            placeholder={active ? "Agent 正在工作…" : props.teamLeadActive ? "向 Root / Lead 发送团队指令…" : "告诉 CodeAgent 你想实现什么…"}
+            placeholder={active ? "Agent 正在工作…" : props.discussMode ? "讨论代码、架构或方案，只读探索…" : props.teamLeadActive ? "向 Root / Lead 发送团队指令…" : "告诉 CodeAgent 你想实现什么…"}
             aria-label="发送消息"
             className="scrollbar-thin min-h-11 w-full resize-none bg-transparent px-2.5 py-2 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-60"
           />
           <div className="flex items-center justify-between gap-3 px-1 pt-1">
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                disabled={active || props.teamLeadActive || !props.teamAvailable}
-                onClick={() => props.onUseTeam(!props.useTeam)}
-                aria-pressed={Boolean(props.useTeam)}
-                className={cx(
-                  "inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[10px] font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
-                  props.teamLeadActive || props.useTeam
-                    ? "border-accent/30 bg-accent/10 text-accent"
-                    : "border-line bg-surface-muted text-ink-muted hover:text-ink",
-                )}
-              >
-                <Users className="size-3.5" />
-                {props.teamLeadActive ? "Team 运行中" : props.useTeam ? "Agent Team 已开启" : "Agent Team"}
-              </button>
-              <div className="text-[9px] text-ink-faint"><kbd className="rounded border border-line bg-surface-muted px-1 py-0.5 font-sans">Enter</kbd> 发送 · <kbd className="rounded border border-line bg-surface-muted px-1 py-0.5 font-sans">Shift Enter</kbd> 换行</div>
+              <ModeSelector mode={props.discussMode ? "discuss" : "normal"} disabled={active || props.sending || props.loading || props.teamLeadActive} onChange={props.onModeChange} />
+              {props.teamLeadActive && (
+                <span className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-accent/30 bg-accent/10 px-2.5 text-[10px] font-medium text-accent">
+                  <Users className="size-3.5" /> Team 运行中
+                </span>
+              )}
+              <div className="hidden text-[9px] text-ink-faint sm:block"><kbd className="rounded border border-line bg-surface-muted px-1 py-0.5 font-sans">Enter</kbd> 发送 · <kbd className="rounded border border-line bg-surface-muted px-1 py-0.5 font-sans">Shift Enter</kbd> 换行</div>
             </div>
             {active ? (
               <button type="button" onClick={props.onCancel} disabled={props.cancelling || props.run?.status === "cancelling"} className="inline-flex h-9 items-center gap-2 rounded-xl border border-danger/20 bg-danger/5 px-3 text-xs font-medium text-danger transition hover:bg-danger/10 disabled:opacity-50">
                 {props.cancelling || props.run?.status === "cancelling" ? <><Spinner className="size-3.5 text-danger" /> 等待当前步骤结束</> : <><Square className="size-3.5 fill-current" /> 停止</>}
               </button>
             ) : (
-              <button type="button" onClick={props.onSend} disabled={!props.draft.trim() || props.sending} className="grid size-9 place-items-center rounded-xl bg-accent text-white shadow-md shadow-accent/20 transition hover:bg-accent-strong disabled:cursor-not-allowed disabled:opacity-40">
+              <button type="button" onClick={props.onSend} disabled={!props.draft.trim() || props.sending || props.loading} className="grid size-9 place-items-center rounded-xl bg-accent text-white shadow-md shadow-accent/20 transition hover:bg-accent-strong disabled:cursor-not-allowed disabled:opacity-40">
                 {props.sending ? <Spinner className="text-white" /> : <Send className="size-4" />}
                 <span className="sr-only">发送</span>
               </button>
@@ -193,13 +189,13 @@ export function ChatWorkspace(props: Props) {
   );
 }
 
-function ChatMessage({ message }: { message: Message }) {
+const ChatMessage = memo(function ChatMessage({ message }: { message: Message }) {
   const user = message.role === "user";
   if (message.role === "system") return <div className="mx-auto max-w-lg rounded-full border border-line bg-surface-muted px-3 py-1 text-center text-[10px] text-ink-muted">{message.content}</div>;
   return (
     <article className={cx("flex gap-3", user && "justify-end")}>
       {!user && <div className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-xl border border-accent/20 bg-accent/10 text-accent"><Bot className="size-4" /></div>}
-      <div className={cx("min-w-0 max-w-[88%] sm:max-w-[82%]", user && "rounded-2xl rounded-br-md bg-user-bubble px-4 py-2.5 text-user-bubble-ink shadow-sm")}>
+      <div className={cx("min-w-0", user ? "max-w-[88%] rounded-2xl rounded-br-md bg-user-bubble px-4 py-2.5 text-user-bubble-ink shadow-sm sm:max-w-[82%]" : "flex-1")}>
         {user ? (
           <p className="whitespace-pre-wrap break-words text-sm leading-6">{message.content}</p>
         ) : (
@@ -209,4 +205,4 @@ function ChatMessage({ message }: { message: Message }) {
       </div>
     </article>
   );
-}
+});
